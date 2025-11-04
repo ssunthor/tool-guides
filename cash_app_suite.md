@@ -1,107 +1,108 @@
-# High-Level Architectural Design: Automation of Cash Application
+# High-Level Architectural Design: Cash Application Suite (SERA)
 
-## 1. Overview & Goal
+**Version:** 1.0.0
+**Date:** 2025-11-04
+**Author(s):** Gemini AI, Martin Kecka
+**Goal:** Full automation of cash application, from ingestion to Oracle posting.
 
-The goal of this project is to automate the cash application process, which is currently a highly manual activity. This design outlines a solution built within the SERA ecosystem to automate receipt creation and application in Oracle, based on data from bank statements, remittance advices, and the CMD system.
+---
 
-The architecture is designed to handle the entire workflow, from data ingestion to final posting in Oracle, including the complex business logic and exception handling detailed in the "Receipt creation and application in Oracle Process" flowchart[cite: 1].
+## 1. Overview & Architectural Pattern 🧠
 
-## 2. Architectural Pattern: Delegated Autonomy
+The project successfully implements the automation of the cash application process based on the **Delegated Autonomy** SERA pattern. The entire business process lifecycle is delegated to the **Cash Application Assistant (CAA)**, which acts as the intelligent orchestration layer (the "AI Accountant").
 
-This solution is a prime candidate for the **Delegated Autonomy** architectural pattern. Instead of being managed directly by the main Sera Orchestrator, the entire business process will be delegated to a new, specialized `(A) Assistant`. This assistant will act as the "AI Accountant," orchestrating a series of deterministic `(C) Connectors` and intelligent `(I) Ingestors` to perform its task. The process will be event-driven, triggered by new payment data rather than a direct user chat command.
+* **SERA Pattern:** **Delegated Autonomy**.
+* **Central Intelligence:** **Cash Application Assistant (CAA)**.
+* **Primary Trigger:** Event-driven, initiated by the **Bank Statement Ingestor (BSI)** upon successfully loading a new transaction into the shared database.
+* **Shared Data Layer:** All modules read and write to a shared **PostgreSQL database**, which houses the core BSI/RMI transaction data and the critical **DB-Driven Business Rules** (`bank_accounts`, `invoice_rules`).
 
-## 3. Proposed SERA Modules
+---
 
-The solution will be composed of five new, independent modules within the SERA ecosystem.
+## 2. SERA Modules and Core Functionality 🛠️
 
-### 3.1. Remittance Ingestor (RMI) - (I) Ingestor
+The architecture consists of four implemented modules (RMI, BSI, CMC, CAA) and the planned Oracle Connector (ORC).
 
-* **Category:** `(I) Ingestor`
-* **Purpose:** To monitor the `credit@gtt.net` mailbox, parse incoming emails, and extract structured data from unstructured remittance advice attachments (e.g., PDF, Excel, jpg).
-* **Responsibilities:**
-    * Connect to the email server to read new messages.
-    * Download and identify remittance advice attachments.
-    * Use a powerful comprehension model from the AI Factory (e.g., `gemma3:27b`) for OCR and structured data extraction, converting documents into a queryable JSON object.
-    * Store the structured remittance data in a dedicated `remittances` table in the shared PostgreSQL database for the assistant to query.
+### 2.1. Remittance Ingestor (RMI) - (I) Ingestor
 
-### 3.2. Bank Statement Ingestor (BSI) - (I) Ingestor
+* **Purpose:** Monitors the `msgraph` inbox in real-time to extract and interpret unstructured remittance advice (PDFs, Excel, images).
+* **Ingestion Pipeline:** Executes a robust, sequential pipeline:
+    * **Text Extraction Gauntlet (Step 2):** A failover sequence attempting the best extraction method first (Excel $\rightarrow$ Paged-PDF $\rightarrow$ OCR $\rightarrow$ Marker $\rightarrow$ Nanonets).
+    * **Stage A4 Validation & Correction Loop:** The AI-powered self-healing stage. It triggers multi-pass vision models to repair both incorrect invoice *numbers* and *amounts* if `validate_totals` fails.
+* **Enrichment:** Uses **DB-driven helpers** (`BankHelper`, `InvoiceHelper`) to validate and enrich extracted data against the live `bank_accounts` and `invoice_rules` tables, replacing brittle static files.
+* **Data Output:** Writes structured remittance data, including **invoice line item JSONB**, to the `rmi_processing_results` table.
+* **Key Feature:** The **`refine_sender_email`** step uses an LLM to find the *original external sender* of a forwarded message, crucial for client linking.
+* **Future Goal:** Implement the **Profile-Driven Intelligent Pipeline** to use sender-specific, optimized workflows instead of the full gauntlet.
 
-* **Category:** `(I) Ingestor`
-* **Purpose:** To automatically ingest the daily bank statement and load each payment transaction into the shared database, triggering the application process.
-* **Responsibilities:**
-    * Run on a daily schedule to connect to the bank data source (e.g., SFTP, API) and download the new statement.
-    * Parse the structured file to extract individual payment records (Payer Name, Amount, Date, Reference Info).
-    * Insert each payment as a new row into a `payments` table in PostgreSQL with a status of "unprocessed."
+### 2.2. Bank Statement Ingestor (BSI) - (I) Ingestor
 
-### 3.3. Oracle Connector (ORC) - (C) Connector
+* **Purpose:** Automates the ingestion, parsing, and standardization of multi-format bank statement files (CSV, XLSX) from various banks.
+* **Channels:** Supports a **gRPC API** for programmatic uploads (saves to temp, archives on success) and a **Local Directory Scanner** for batch processing.
+* **DB-Driven Enrichment (Core Value):**
+    * `BranchHelper`: Queries the `bank_accounts` table to resolve account numbers to human-readable **branch names**.
+    * `InvoiceParserHelper`: Queries the `invoice_rules` table to fetch regex patterns (prefix/length) to extract structured **invoice/credit memo numbers** from raw transaction text.
+* **Data Output:** Creates records in `bsi_statement_files` (summary), `bsi_transactions` (lines), and **upserts** balances into `daily_account_balances` (for time-series data).
+* **Key Feature:** The `reprocess-statement --file-id <UUID>` CLI command finds the original file in the archive, re-parses it, and updates/deletes related database records to ensure data integrity after parsing logic changes.
 
-* **Category:** `(C) Connector`
-* **Purpose:** To provide a safe, deterministic, and LLM-free gRPC API for all necessary actions within Oracle, directly mapping to the steps in the process flowchart[cite: 1].
-* **gRPC Methods:**
-    * `CreateReceiptBatch(batch_details)`: Initiates a new batch in Oracle as the first step in the process[cite: 1].
-    * `AddPaymentToBatch(batch_id, payment_details)`: Adds a specific payment record to an existing batch.
-    * `FindOpenItems(customer_id)`: Returns all open items for a customer, including invoices and Credit Memos (CMs).
-    * `ValidateItem(item_id)`: Checks if an item (invoice/CM) is valid and returns its status, amount, and due date.
-    * `ApplyPaymentToItems(batch_id, payment_id, item_applications)`: Applies a payment to one or more specified invoices/CMs within a batch.
-    * `PostBatch(batch_id)`: Finalizes and posts the batch, making the transactions permanent in Oracle[cite: 1].
+### 2.3. Client Master Connector (CMC) - (C) Connector
 
-### 3.4. CMD Connector (CMC) - (C) Connector
+* **Purpose:** The authoritative, resilient gateway to the **CMD GraphQL API** for client and master data.
+* **Dual Service Model:** Serves both:
+    * **Live GraphQL API** results: `GetClientByEmail` (handles domain matching and disambiguation) and `ValidateInvoices`.
+    * **Local Asset Data:** Pre-processed snapshots (`live_open_invoices.csv`, `invoice_rules.json`) served via gRPC for high-speed access.
+* **Resilience:** Built on the `tenacity` library, managing OAuth2 token refresh and implementing specific backoff strategies for **HTTP 429 (Rate Limit)** errors.
+* **Future Goals:**
+    * Implement **User Identity Auditing** by logging the `X-Forwarded-User` header for all transactions.
+    * Develop the **Panda** analysis utility (`GetAggregatedInvoices`) to return small, pre-processed summaries instead of large, raw datasets, preventing LLM overload.
 
-* **Category:** `(C) Connector`
-* **Purpose:** To act as a simple, LLM-free bridge to the CMD system for client information lookups.
-* **gRPC Methods:**
-    * `GetClientInfo(client_name)`: Retrieves the unique client ID/BAN based on the payer name found on the bank statement.
+### 2.4. Cash Application Assistant (CAA) - (A) Assistant
 
-### 3.5. Cash Application Assistant (CAA) - (A) Assistant
+* **Purpose:** The **Brain**. Embodies the complex cash application decision-making logic, orchestrating the end-to-end process and managing exceptions.
+* **Core Logic:** The **RuleEngine** (`core/rule_engine.py`) operates as a state machine on the `cash_application_process` table, guided by the transaction's current status.
+* **Pre-Processing Services:** Runs dedicated background services (`linking_service`, `invoice_matching_service`) to proactively populate lookup caches, improving real-time performance.
+* **Application Rules Stack (Priority-Driven):** Executes a high-priority sequence of rules in the `client_linked` state:
+    * **`ApplyRmiDirectRule`:** Highest confidence match using pre-validated RMI data.
+    * **`ApplyOrigAmtRule` / `ApplyBalanceMatchRule`:** 1:1 invoice matches (original or current balance).
+    * **`ApplyNettedBsiRule`:** Matches the payment amount to a sum of invoices/memos extracted by BSI.
+    * **`ApplyGlobalOrigAmtRule`:** Global 1:1 match that uses an **LLM** for **contextual client disambiguation** if multiple clients match the amount.
 
-* **Category:** `(A) Assistant`
-* **Purpose:** This is the **brain** of the operation. ]It is a specialized assistant that embodies the complex decision-making logic of a cash applications specialist as depicted in the flowchart[cite: 1]. It orchestrates the entire process from start to finish.
-* **Responsibilities:**
-    * Use a powerful reasoning model (`gemma3:27b`) to analyze incoming payments and execute a multi-step plan.
-    * Orchestrate gRPC calls to the ORC and CMC to interact with the source systems.
-    * Query the PostgreSQL database for ingested remittance and payment data.
-    * Execute a complex decision tree to handle various scenarios, including perfect matches and exceptions.
-    * Identify specific variance types noted in the flowchart, such as **Bank fee**, **Double payment**, **Overpayment**, and **Bad invoice detail**[cite: 1].
-    * Manage the Human-in-the-Loop (HITL) workflow by pausing, escalating for manual validation with clear findings and options, and resuming upon receiving a decision.
+### 2.5. Oracle Connector (ORC) - (C) Connector (Future)
 
-## 4. End-to-End Automated Workflow
+* **Status:** Planned future enhancement (Pending ORC development).
+* **Purpose:** To provide a safe, deterministic, and LLM-free gRPC API for all necessary actions within the Oracle ERP system.
+* **Key gRPC Methods (Planned):** `CreateReceiptBatch`, `AddPaymentToBatch`, `FindOpenItems`, `ApplyPaymentToItems`, `PostBatch`.
+* **Integration Point:** The final execution step of the CAA RuleEngine for all successfully applied transactions (`applied_...` statuses).
 
-The workflow is designed to handle both the "happy path" and the numerous exceptions identified in the business process.
+---
 
-1.  **Trigger:** The **BSI** ingests a new payment and calls the **CAA** to begin the application process.
+## 3. End-to-End Automated Workflow (The CAA State Machine) ➡️
 
-2.  **Step 1: Setup & Information Gathering**
-    * The CAA receives the payment details.
-    * It makes its first call to `ORC.CreateReceiptBatch()` to initialize the process in Oracle.
-    * It queries the PostgreSQL database for any matching remittance data from the **RMI**.
-    * It calls `CMC.GetClientInfo()` to resolve the payer name to a unique customer ID.
+The workflow is driven by the state of the `CashApplicationProcess` record, executing a specific set of rules at each stage:
 
-3.  **Step 2: Automated Analysis (The "Happy Path")**
-    * A single, matching remittance is found in the database. The total amount perfectly matches the payment.
-    * The CAA validates each invoice listed on the remittance by calling `ORC.ValidateItem()`.
-    * If all invoices are valid and open, the CAA proceeds directly to the execution step.
+1.  **Trigger (N/A):** **BSI** completes processing and inserts data into `bsi_transactions`, creating a new `cash_application_process` record with status `new`.
+2.  **State `new`:**
+    * `CheckSkipConditionsRule` filters non-payment items (fees, payroll, internal transfers).
+    * `FindRmiRule` attempts to find a matching `RmiProcessingResult` (based on amount, currency, and date window).
+3.  **State `pending_client_email`:**
+    * `MatchClientByEmailRule` uses the RMI sender email and **CMC** to resolve the `cmd_client_id` (sets status to `client_linked`).
+4.  **State `pending_client_invoice_link`:** (Fallback if RMI/Email failed)
+    * `MatchClientByBsiInvoiceRule` uses **BSI's enriched invoice numbers** to query CMC open items and find an unambiguous client group (sets status to `client_linked`).
+5.  **State `pending_client_fuzzy_link`:** (Fallback if all structured methods failed)
+    * `MatchClientByPayerPrefixRule` and `MatchClientByFuzzyPayerRule` attempt to link the client via name analysis.
+6.  **State `client_linked`:** (The Main Application Stack)
+    * The **Application Rules** (Section 2.4) run in sequence until a conclusive match is found (e.g., `applied_rmi_direct`).
+7.  **State $\rightarrow$ `pending_hitl_diagnosis`:** (If no application rule concludes)
+    * **Diagnosis Rules** (`DiagnoseRmiFailureRule`, `DiagnoseClientNotFoundRule`) execute to determine the *specific* reason for failure (e.g., `hitl_rmi_mismatch`, `hitl_client_not_found`).
+8.  **Final Execution (`applied_...`):** (Future) The process calls **ORC.ApplyPaymentToItems()** and **ORC.PostBatch()** to complete the transaction in the ERP.
 
-4.  **Step 3: Exception Analysis & HITL Escalation (The "Unhappy Path")**
-    * The CAA's reasoning engine analyzes any discrepancy based on the flowchart's logic.
-    * **No Remittance Found:** The CAA calls `ORC.FindOpenItems()`. If a single invoice matches the payment amount exactly, it proceeds. Otherwise, it escalates to the HITL with a list of open invoices as suggested applications.
-    * **Amount Mismatch:** If the remittance total does not match the payment, the CAA investigates the cause:
-        * It checks for known **bank fees** that could account for the difference.
-        * It queries its own logs for recent, identical payments to flag a potential **double payment**.
-        * For any other **overpayment** or **underpayment**, it escalates to the HITL for a decision.
+---
 
-5.  **Step 4: Execution and Completion**
-    * Once a valid plan is confirmed (either automatically or via human approval), the CAA makes the final calls.
-    * It calls `ORC.ApplyPaymentToItems()` with the precise, validated mappings.
-    * It calls `ORC.PostBatch()` to finalize the transactions in Oracle.
-    * The entire transaction, including the reasoning and any human decisions, is recorded in an audit log in PostgreSQL.
+## 4. Human-in-the-Loop (HITL) Integration 🧑‍💻
 
-## 5. Human-in-the-Loop (HITL) Integration
+HITL is managed as a highly structured exception workflow, with the CAA providing a specific diagnosis before pausing.
 
-The multiple "Manual validation" steps in the flowchart necessitate a robust HITL workflow[cite: 1]. This is not a separate module but a core capability of the **CAA**.
-
-* **Pause and Escalate:** When the CAA cannot make a decision with high confidence, it will pause the workflow and persist its current state.
-* **Structured Request:** It will send a structured request to a human review queue (e.g., a dedicated MS Teams channel, Jira, or a simple web UI). This request will contain:
-    * All gathered context (payment info, remittance data, open invoices).
-    * The specific problem identified (e.g., "Overpayment of $50.25 detected").
-    * A set of clear, actionable options for the human operator (e.g., "Apply to oldest invoice," "Leave on account as unapplied cash," "Reject payment").
-* **Resume on Response:** The CAA will wait for a structured response via an API call from t
+* **Trigger:** The CAA enters the `pending_hitl_diagnosis` state after all application rules fail.
+* **Diagnosis:** The CAA runs a final set of rules to set a highly specific **diagnostic status** (e.g., `hitl_bsi_amount_mismatch` if `ApplyBsiDailyGroupRule` logged a failure).
+* **Escalation:** The workflow is paused, and a structured request is sent (e.g., to a dedicated UI) containing:
+    * All gathered context (BSI, RMI, CMC data).
+    * The precise, actionable **diagnostic status** code.
+* **Resolution:** The CAA waits for a structured response (via API) from the human operator, which provides the final application instructions, allowing the CAA to update the database and resume the workflow.
