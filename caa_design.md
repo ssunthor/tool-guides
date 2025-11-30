@@ -16,7 +16,7 @@ CAA operates by processing individual bank transactions ingested by the Bank Sta
 
 * Identify and Skip Non-Payment Transactions: Filter out items like bank fees, payroll, or internal transfers.
 * Link to Supporting Data: Find related Remittance Advice details processed by the Remittance Mail Ingestor (RMI).
-* Identify the Client: Determine the correct client entity associated with the payment using data from RMI, BSI details, and the Client Master Connector (CMC).
+* Identify the Client: Determine the correct client entity associated with the payment using data from RMI, BSI details, and the CMD Connector (CMC).
 * Match to Open Invoices: Compare payment details and remittance information against open invoice data (sourced via CMC) to determine the specific items being paid.
 * Determine Final Application Status: Assign a status indicating successful automatic application, the need for human review (HITL), or an error state.
 
@@ -33,7 +33,7 @@ The system provides a user interface for monitoring the status of each transacti
 
 * **BSI (Bank Statement Ingestor):** Provides new bank statement transactions via gRPC calls to BSI's ProcessBankStatement endpoint, which writes transaction data to the shared PostgreSQL database (bsi_transactions table). CAA monitors this table for new entries.
 * **RMI (Remittance Mail Ingestor):** Provides processed remittance advice data stored in the shared PostgreSQL database (rmi_processing_results table). CAA queries this table during its rule execution.
-* **CMC (Client Master Connector):** Provides client lookup (via `GetClientByEmail`), open invoice data (via `GetOpenInvoices`), and master data for business units (via `GetBuBankInfo`) and invoice rules (via `GetInvoiceRules`). This data is populated into the CAA database via the `populate_bu_rules.py` script.
+* **CMC (CMD Connector):** Provides client lookup (via `GetClientByEmail`), open invoice data (via `GetOpenInvoices`), and master data for business units (via `GetBuBankInfo`) and invoice rules (via `GetInvoiceRules`). This data is populated into the CAA database via the `populate_bu_rules.py` script.
 * **PostgreSQL Database:**
     * **Owns:** `cash_application_process` (state machine), `email_client_link` (linking cache), `rmi_open_invoice_match` (RMI matching cache), and master data tables (`business_units`, `bank_accounts`, `invoice_rules`).
     * **Reads:** `rmi_processing_results` (from RMI) and `bsi_transactions` / `bsi_statement_files` (from BSI).

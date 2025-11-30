@@ -66,7 +66,7 @@ As CVs are analyzed, they appear in real-time on the main results list for that 
 Clicking on a candidate's row expands a detailed report card:
 
 * **The Bottom Line:** An immediate summary of the candidate's single biggest **Key Strength** and **Top Concern**.
-* **Badges:** Visual tags highlight important attributes like "✅ Hard Criteria Met," "🏆 Key Competitor Experience," and flags for potential salary mismatch or high churn risk. A 📊 **Confidence Indicator** provides an at-a-glance measure of the CV's data reliability.
+* **Badges:** Visual tags highlight important attributes like "✅ Hard Criteria Met," "🏆 Key Competitor Experience," and flags for potential salary mismatch. The **'High Churn Risk'** badge is now nuanced, appearing as a red 'High Churn Risk' for consistent job hoppers or a yellow **'Medium Churn Risk'** for candidates who also have a history of long-term stability. A 📊 **Confidence Indicator** provides an at-a-glance measure of the CV's data reliability.
 * **Full Analysis:** An expandable section contains the detailed AI reasoning, pros, cons, a breakdown of how the final score was calculated, and an evaluation against the defined Key Criteria.
 * **Interview Intelligence:** The report includes AI-generated interview questions and guidance. An **"Analyze Interview Transcript"** button allows you to paste a full interview transcript for a comprehensive, automated analysis of the candidate's performance.
 * **Hiring Stage Management:** The candidate's current stage in the hiring process can be viewed and updated directly from the expanded view or the Kanban board.
@@ -141,25 +141,26 @@ The `overall_assessment` for each candidate is calculated programmatically throu
 
 2.  **Score Modifiers:** Points are then added to or subtracted from the base score according to the rules in `scoring_logic.yaml`:
 
-| Factor                  | Condition                                | Modifier      | Rationale                                                          |
-| :---------------------- | :--------------------------------------- | :------------ | :----------------------------------------------------------------- |
-| **Key Criteria**        | Fails a 'Critical' criterion             | `-1.5` points | Failure to meet a "must-have" is a significant weakness.           |
-|                         | Fails an 'Important' criterion           | `-1.0` points | A candidate lacking this would be at a clear disadvantage.         |
-|                         | Fails a 'Preferred' criterion            | `-0.5` points | A "nice-to-have" that is not essential.                            |
-| **Career Trajectory**   | Each fast-track promotion (within 2 yrs) | `+1.0` points | Indicates high ambition and potential for growth.                  |
-|                         | Has ≥ 2 roles lasting < 18 months        | `-2.0` points | A major red flag for retention and team stability.                 |
-|                         | Each unexplained career gap > 6 months   | `-0.5` points | Indicates potential periods of unemployment.                       |
-|                         | Career path is deemed 'Volatile'         | `-1.0` points | Frequent, unrelated shifts in career path.                         |
-|                         | Is a 'Fresh Graduate'                    | `-0.5` points | Acknowledges lack of professional experience.                      |
-|                         | Stable & Reliable Career History         | `+0.5` points | Indicates loyalty and deep expertise; a valuable trait.            |
-| **Skill Recency**       | Recency Score > 8.0                      | `+0.5` points | Skills are current and immediately applicable.                     |
-|                         | Recency Score < 5.0                      | `-0.5` points | Skills are dated and may require significant ramp-up.              |
-| **Bonus Factors**       | Has Competitor Experience                | `+0.5` points | A "nice-to-have" that provides a competitive edge.                 |
-|                         | Is Former Employee                       | `+0.5` points | Known quantity, familiar with company culture.                     |
-|                         | Is Internal Referral                     | `+0.5` points | Vouched for by a current employee.                                 |
-|                         | Has International Exposure               | `+0.5` points | Valuable for global teams and diverse markets.                     |
-|                         | Has Relevant Certification               | `+0.5` points | Possesses a validated, role-relevant credential.                   |
-| **Custom Rules**        | Meets a user-defined custom rule         | (variable)    | User-configured bonus points for specific attributes.              |
+| Factor                  | Condition                                | Modifier      | Rationale                                                           |
+| :---------------------- | :--------------------------------------- | :------------ | :------------------------------------------------------------------ |
+| **Key Criteria**        | Fails a 'Critical' criterion             | `-1.5` points | Failure to meet a "must-have" is a significant weakness.            |
+|                         | Fails an 'Important' criterion           | `-1.0` points | A candidate lacking this would be at a clear disadvantage.          |
+|                         | Fails a 'Preferred' criterion            | `-0.5` points | A "nice-to-have" that is not essential.                             |
+| **Career Trajectory**   | Each fast-track promotion (within 2 yrs) | `+1.0` points | Indicates high ambition and potential for growth.                   |
+|                         | Has ≥ 2 roles lasting < 18 months        | `-2.0` points | A major red flag for retention and team stability.                  |
+|                         | Each unexplained career gap > 6 months   | `-0.5` points | Indicates potential periods of unemployment.                        |
+|                         | Career path is deemed 'Volatile'         | `-1.0` points | Frequent, unrelated shifts in career path.                          |
+|                         | Is a 'Fresh Graduate'                    | `-0.5` points | Acknowledges lack of professional experience.                       |
+|                         | Has churn risk AND stability (≥ 5 yrs)   | `+1.5` points | A special bonus to offset early-career churn for stable candidates. |
+|                         | Stable & Reliable Career History         | `+0.5` points | Indicates loyalty and deep expertise; a valuable trait.             |
+| **Skill Recency**       | Recency Score > 8.0                      | `+0.5` points | Skills are current and immediately applicable.                      |
+|                         | Recency Score < 5.0                      | `-0.5` points | Skills are dated and may require significant ramp-up.               |
+| **Bonus Factors**       | Has Competitor Experience                | `+0.5` points | A "nice-to-have" that provides a competitive edge.                  |
+|                         | Is Former Employee                       | `+0.5` points | Known quantity, familiar with company culture.                      |
+|                         | Is Internal Referral                     | `+0.5` points | Vouched for by a current employee.                                  |
+|                         | Has International Exposure               | `+0.5` points | Valuable for global teams and diverse markets.                      |
+|                         | Has Relevant Certification               | `+0.5` points | Possesses a validated, role-relevant credential.                    |
+| **Custom Rules**        | Meets a user-defined custom rule         | (variable)    | User-configured bonus points for specific attributes.               |
 
 3.  **Final Assessment Brackets:** After all modifiers are applied, the final score is translated into a human-readable assessment based on these brackets:
     * **Score >= 8.5:** Strong Candidate

@@ -1,4 +1,4 @@
-# Client Master Connector (CMC) - Design Document
+# CMD Connector (CMC) - Design Document
 
 **Version:** 1.0.0
 **Date:** 2025-11-04
@@ -10,7 +10,7 @@
 
 ## 1. Introduction & Purpose
 
-The **Client Master Connector (CMC)** is a deterministic and robust Python service designed to be the authoritative gateway for interacting with the **CMD GraphQL API**. Its core purpose is to provide downstream consuming systems (like the Cash Application Assistant or other automation tools) with reliable, formatted access to core client, contact, ERP, and banking master data.
+The **CMD Connector (CMC)** is a deterministic and robust Python service designed to be the authoritative gateway for interacting with the **CMD GraphQL API**. Its core purpose is to provide downstream consuming systems (like the Cash Application Assistant or other automation tools) with reliable, formatted access to core client, contact, ERP, and banking master data.
 
 The CMC focuses on three primary functions:
 

@@ -221,17 +221,27 @@ The application's behavior is controlled by `config/settings.yaml`.
 
 ## 8. Future Enhancements
 
--   **CAA Integration & Feedback Loop**: Develop a mechanism for the RMI to receive corrected data from the Cash Application Assistant. This feedback could be used to flag common errors or potentially fine-tune prompts for specific customers.
--   **Context-Aware Currency Disambiguation**: Enhance the `normalize_currency` step. Instead of defaulting ambiguous symbols like `$` to `USD`, use other context (e.g., customer's country, if known) to make a more intelligent default (e.g., `CAD` for Canadian customers).
--   **Profile-Driven Intelligent Pipeline (Sender-Specific Workflows)**: This is the most critical planned enhancement to move the RMI from a "brute-force gauntlet" model to an intelligent, learning system. The current design wastefully processes every email through the same blind, multi-step pipeline, which is inefficient for known senders and resource-intensive for complex documents.
-    -   **Core Problem:** The current pipeline runs every extraction method (`ocr`, `marker`, `nanonets`) and every repair step on all documents, regardless of sender. This "one-size-fits-all" approach is slow and does not learn from past successes or failures.
-    -   **Proposed Solution:**
-        1.  **Create a "Sender Profile" Database:** A new table (e.g., `sender_profiles`) will be created, keyed by the sender's email address or domain. This profile will store an optimized workflow configuration, such as:
-            -   `primary_extractor`: The *one* extractor known to work best (e.g., `excel`, `marker-ocr`).
-            -   `invoice_regex`: A sender-specific regex for highly accurate invoice validation, replacing the generic validator.
-            -   `skip_repairs`: A list of repair steps to *skip* for this sender (e.g., `["repair_vision_customer_name"]`).
-            -   `trust_level`: A flag (e.g., `high`, `low`) to determine if validation is even needed.
-        2.  **Redesign Orchestrator Logic:** The `orchestrator` will be modified to first look up a profile for the incoming `sender_email`.
-            -   **Profile Found:** The orchestrator runs a fast, optimized workflow defined by the profile (e.g., "Run `excel` extractor, validate with `invoice_regex`, skip all repairs").
-            -   **No Profile Found:** The orchestrator runs the *current* "gauntlet" pipeline to discover the best processing method.
-        3.  **Implement a "Learning Feedback Loop":** A Human-in-the-Loop (HITL) review UI will be created for `FLAGGED_FOR_REVIEW` items. When an operator corrects a document from an "Unknown Sender," they will not only fix the data but also *create* the Sender Profile (e.g., "For this sender, the correct extractor was `marker` and the regex is `INV-\d{8}`"). This profile is then saved, ensuring the *next* email from that sender is processed instantly and accurately.
+The RMI is currently robust but resource-intensive. The next major architectural evolution will shift from a "linear gauntlet" model to an "intelligent router" model.
+
+### 8.1. Phase 2 Architecture: The "Intelligent Router" (Refactor)
+**Objective:** Move away from running every extraction workflow on every document. instead, classify the document first and route it to the most efficient, specialized pipeline track.
+
+**Core Components:**
+1.  **The Traffic Controller (Step 1):**
+    * **Input:** Metadata (Sender, Subject) + Email Body + Document Thumbnail.
+    * **Logic:** Checks a new `sender_profiles` database table.
+    * **Action:** Determines the `processing_strategy` before any heavy extraction begins.
+
+2.  **specialized Pipeline Tracks:**
+    * **Track A (The "Noise" Track):** Immediate classification for Auto-responses, Out-of-Office, and Secure Portal notifications. *Cost: Near Zero.*
+    * **Track B (The "Standard" Track):** For known clean formats. Runs fast extractors (`Excel` or `OCR`) + LLM Extraction. Skips expensive vision repairs.
+    * **Track C (The "Heavy" Track):** For unknown senders or complex layouts. Runs the full current suite (`Marker`, `Nanonets`) + Vision Repair loops.
+    * **Track D (The "Custom" Track):** For specific "messy" invoices that consistently fail standard methods. Executes hard-coded, customer-specific parsing logic based on the sender profile.
+
+### 8.2. Database & Learning Enhancements
+* **Sender Profile Database:** A new table to store learned preferences for each sender (e.g., `preferred_workflow='track_b'`, `invoice_regex='INV-\d{8}'`).
+* **The "Learning" Feedback Loop:** When an operator manually corrects a record in the dashboard, the system should capture *why* it failed (e.g., "This is a scanned image," "This is a custom Excel format"). This feedback updates the `sender_profile`, ensuring the *next* email from that customer is routed correctly automatically.
+
+### 8.3. Other Planned Improvements
+* **CAA Integration:** Develop a mechanism for the RMI to receive corrected data validation signals from the Cash Application Assistant to further refine sender profiles.
+* **Context-Aware Currency Disambiguation:** Enhance `normalize_currency` to use customer country data for smarter default currency selection (e.g., default to `CAD` for Canadian vendors instead of `USD`).
