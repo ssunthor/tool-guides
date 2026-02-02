@@ -456,6 +456,7 @@ The CAA UI is a Single Page Application built with React, Vite, and Material UI,
 ### 9.1 Functional Roadmap
 * **User Task Assignment:** Update the data model to allow assigning specific HITL transactions to individual users (e.g., `assigned_to_user_id`), creating personalized "My Work" views for Finance operators.
 * **Direct Posting Mode:** Implement a "Fast Track" configuration that allows high-confidence matches (e.g., 100% Exact Match on Invoice & Amount) to bypass the Oracle Staging Queue and post directly to ERP, further reducing manual review volume.
+* **Archive Function:** Once Oracle is fully processed we should "archive" all related items from our database
 
 ### 9.2 Documentation & AI Context Optimization
 * **Glossary of Concepts:** Create a strict definition list distinguishing *BSI Payer*, *CMD Client*, and *Oracle Customer* to prevent LLM hallucinations during feedback analysis.

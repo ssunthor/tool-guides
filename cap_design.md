@@ -1,7 +1,7 @@
 # CV Analysis Processor (CAP) - Design Document
 
-**Version:** 2.0.1
-**Date:** 2025-10-29
+**Version:** 2.5.1
+**Date:** 2026-02-02
 **Author(s):** Martin Kecka, Gemini AI
 **Category:** Processor (P)
 **Acronym:** CAP
@@ -33,22 +33,27 @@ This section describes the typical journey a recruiter or hiring manager will ta
 
 The user's journey begins at the main **Dashboard**, which provides a high-level overview of the system's activity, including statistics on open positions, total candidates analyzed, and overall assessment distribution. Users with appropriate permissions ('Recruiter' or 'Admin') can also access the **Recruiter Dashboard** for a more detailed, actionable view tailored to specific recruiters or the overall team performance.
 
-From here, the primary workflow is organized by job positions. The user navigates to the **Jobs List Page**, where they can either create a new position or select an existing one from a responsive, card-based interface with filtering and sorting capabilities.
+From here, the primary workflow is organized by job positions. The user navigates to the **Jobs List Page**, where positions are now **automatically synchronized** from Workday.
 
-When creating or editing a position, a modal dialog appears, allowing the user to provide essential details:
+* **Automated Ingestion:** New requisitions from Workday appear automatically.
+* **Live Status Tracking:** Jobs display their real-time Workday status (Open, Filled, Frozen, Closed).
+* **Metadata Enrichment:** The system automatically extracts the Worker Type (Regular vs. Contractor), Location (with ISO country flags), and Recruiter assignment.
 
-* **Job Title** and **Job Description**.
-* **Compensation:** An optional budget range for the role (`min_budget`, `max_budget`, `currency`).
+Users can still manually edit a position to refine the AI's instructions:
+
+* **Compensation:** While suggested by Workday, the budget can be manually tuned.
 * **Hard Criteria (Dealbreakers):** A list of non-negotiable requirements.
 * **Key Evaluation Criteria:** A prioritized list of the most important evaluation criteria (Critical, Important, or Preferred).
 * **AI-Assisted Configuration:** The UI includes AI-powered helpers to automatically suggest key criteria, categorize the job, suggest relevant locations, and **suggest a market-rate budget** directly from the job description text.
 
-### Step 2: Upload CVs
+### Step 2: Upload CVs (Manual or Automated)
 
-Once a job is selected, the user is taken to the **Analysis Page** for that position. CVs can be uploaded via a drag-and-drop interface that supports:
+Once a job is selected, the user is taken to the **Analysis Page** for that position.
 
-* **Single or Multiple Upload:** Upload one or more CVs (.pdf, .docx) at a time.
-* **Bulk ATS Upload:** Drop in a single, large PDF exported from an ATS like Workday. The system automatically detects and splits the file into individual candidate CVs, creating a separate analysis for each one.
+* **Automated Workday Sync:** Candidates applying via Workday are automatically ingested, processed for consent (GDPR/Compliance), and analyzed without human intervention.
+* **Manual Upload:** Users can still manually upload CVs via a drag-and-drop interface that supports:
+    * **Single or Multiple Upload:** Upload one or more CVs (.pdf, .docx) at a time.
+    * **Bulk ATS Upload:** Drop in a single, large PDF exported from an ATS. The system automatically detects and splits the file into individual candidate CVs, creating a separate analysis for each one.
 
 ### Step 3: Review the Candidate Analysis Page
 
@@ -56,17 +61,20 @@ As CVs are analyzed, they appear in real-time on the main results list for that 
 
 * **At-a-Glance Ranking:** Candidates are automatically sorted by their overall assessment, with the strongest fits at the top.
 * **Rich Candidate Rows:** Each candidate is displayed in a detailed row that includes their name, overall assessment, key scores (Alignment, Credibility, Recency), and a set of visual badges.
+* **Smart Status Indicators:** The system clearly distinguishes between:
+    * **AI-Ready:** Candidates who consented and were successfully analyzed.
+    * **Manual Review (Opt-Out):** Candidates who declined AI consent in Workday (marked with a grey icon).
+    * **Manual Review (Error):** Candidates who consented but had missing or corrupt attachments (marked with a red error icon).
 * **View Modes:** Users can switch between a detailed **List View** (with default and compact row options) and a **Kanban Board View** to visualize and manage candidates based on their current **Hiring Stage** (New, Screening, Interviewing, etc.). Candidates can be dragged and dropped between stages on the Kanban board.
 * **Advanced Filtering & Sorting:** The UI provides powerful controls to filter by assessment category, specific badges (e.g., "Key Competitor"), career trajectory, or **Hiring Stage**, and to sort by any score. A one-click filter hides all candidates who failed the "Hard Criteria".
-* **Bulk Actions:** Users can select multiple candidates to perform bulk actions, such as generating a head-to-head **Comparison Report** or deleting multiple entries at once. Options to select all candidates on the current page or all candidates matching the current filters are available.
-* **Asynchronous Feedback:** The UI provides immediate feedback and progress indicators for long-running background jobs like a full "Re-analyze All" task, allowing the user to continue their work or even close the browser while processing completes reliably on the server.
+* **Bulk Actions:** Users can select multiple candidates to perform bulk actions, such as generating a head-to-head **Comparison Report** or deleting multiple entries at once.
 
 ### Step 4: Dive into Individual Reports
 
 Clicking on a candidate's row expands a detailed report card:
 
 * **The Bottom Line:** An immediate summary of the candidate's single biggest **Key Strength** and **Top Concern**.
-* **Badges:** Visual tags highlight important attributes like "✅ Hard Criteria Met," "🏆 Key Competitor Experience," and flags for potential salary mismatch. The **'High Churn Risk'** badge is now nuanced, appearing as a red 'High Churn Risk' for consistent job hoppers or a yellow **'Medium Churn Risk'** for candidates who also have a history of long-term stability. A 📊 **Confidence Indicator** provides an at-a-glance measure of the CV's data reliability.
+* **Badges:** Visual tags highlight important attributes like "✅ Hard Criteria Met," "🏆 Key Competitor Experience," and flags for potential salary mismatch. The **'High Churn Risk'** badge is nuanced, appearing as a red 'High Churn Risk' for consistent job hoppers or a yellow **'Medium Churn Risk'** for candidates who also have a history of long-term stability. A 📊 **Confidence Indicator** provides an at-a-glance measure of the CV's data reliability.
 * **Full Analysis:** An expandable section contains the detailed AI reasoning, pros, cons, a breakdown of how the final score was calculated, and an evaluation against the defined Key Criteria.
 * **Interview Intelligence:** The report includes AI-generated interview questions and guidance. An **"Analyze Interview Transcript"** button allows you to paste a full interview transcript for a comprehensive, automated analysis of the candidate's performance.
 * **Hiring Stage Management:** The candidate's current stage in the hiring process can be viewed and updated directly from the expanded view or the Kanban board.
@@ -81,7 +89,12 @@ From an action menu on each candidate's row, the user can:
 
 ### Step 6: Configure the System
 
-A dedicated **Settings Page** provides a user-friendly interface for administrators to manage all of the application's configuration files without needing to edit YAML manually. This includes managing the competitor list, job categories, and the scoring logic itself, including an AI-powered tool to generate new **Custom Bonus Rules** from natural language descriptions.
+A dedicated **Settings Page** provides a user-friendly interface for administrators to manage all of the application's configuration files without needing to edit YAML manually. These settings are persisted in the database and applied in real-time.
+
+* **Live Configuration:** Admins can update the **Scoring Logic**, **Competitor List**, and **Job Categories** on the fly. Changes take effect immediately for all subsequent analyses.
+* **Fraud & Risk Rules:** A dedicated editor allows admins to manage blocklists for suspicious email domains (e.g., "Resume Farms") and regex patterns for security risks.
+* **AI Rule Generator:** An AI-powered tool allows users to generate complex **Custom Bonus Rules** (e.g., "Award 2 points for volunteering experience") simply by describing them in natural language.
+* **Disaster Recovery:** To prevent configuration drift, the system automatically snapshots all settings to JSON backup files daily. Admins can restore previous configurations via the CLI (`config restore`) if needed.
 
 ---
 
@@ -139,7 +152,7 @@ The `overall_assessment` for each candidate is calculated programmatically throu
 
 1.  **Base Score:** The calculation begins with the candidate's `alignment_score` (a float from 0.0 to 10.0).
 
-2.  **Score Modifiers:** Points are then added to or subtracted from the base score according to the rules in `scoring_logic.yaml`:
+2.  **Score Modifiers:** Points are then added to or subtracted from the base score according to the **active rules configured in the System Settings** (Database):
 
 | Factor                  | Condition                                | Modifier      | Rationale                                                           |
 | :---------------------- | :--------------------------------------- | :------------ | :------------------------------------------------------------------ |
@@ -160,6 +173,7 @@ The `overall_assessment` for each candidate is calculated programmatically throu
 |                         | Is Internal Referral                     | `+0.5` points | Vouched for by a current employee.                                  |
 |                         | Has International Exposure               | `+0.5` points | Valuable for global teams and diverse markets.                      |
 |                         | Has Relevant Certification               | `+0.5` points | Possesses a validated, role-relevant credential.                    |
+| **Risk Factors**        | Detected 'Agency Email Pattern'          | `-1.0` points | Email matches a known bulk-application farm domain or regex.        |
 | **Custom Rules**        | Meets a user-defined custom rule         | (variable)    | User-configured bonus points for specific attributes.               |
 
 3.  **Final Assessment Brackets:** After all modifiers are applied, the final score is translated into a human-readable assessment based on these brackets:
@@ -182,12 +196,13 @@ To add a crucial layer of context, every analysis includes a **Confidence Indica
 
 #### Critical Overrides (Knock-out Rules)
 
-Certain findings are considered critical dealbreakers that bypass the point-based scoring system entirely.
+Certain findings are considered critical dealbreakers that bypass the point-based scoring system entirely. If any of the following conditions are met, the final assessment is assigned automatically, regardless of the calculated score:
 
-| Condition                       | Automatic Assessment                        | Rationale                                                            |
-| :------------------------------ | :------------------------------------------ | :------------------------------------------------------------------- |
-| Fails any **Hard Criteria**     | **Not a Fit**                               | These are non-negotiable requirements for the role.                  |
-| **Credibility Score < 4.0**     | **Warning: High Likelihood of Fabrication** | The CV's contents cannot be trusted, making other scores irrelevant. |
+| Condition                       | Automatic Assessment                        | Rationale                                                                 |
+| :------------------------------ | :------------------------------------------ | :------------------------------------------------------------------------ |
+| Fails any **Hard Criteria**     | **Not a Fit**                               | These are non-negotiable requirements for the role.                       |
+| **Credibility Score < 4.0**     | **Warning: High Likelihood of Fabrication** | The CV's contents cannot be trusted, making other scores irrelevant.      |
+| **Prompt Injection Detected**   | **Security Flag**                           | Hidden instructions to manipulate the AI (e.g. "Ignore CV and Hire Me!"). |
 
 #### The Salary Mismatch Flag
 
@@ -229,21 +244,58 @@ Analyzing an interview transcript triggers a re-evaluation of the candidate's sc
 
 ## 4. Architecture & Integration
 
-* **Service Type:** (P) Processor Module with a user-facing React/FastAPI UI and a background worker service.
+* **Service Type:** (P) Processor Module with a user-facing React/FastAPI UI and a distributed Celery worker cluster.
 * **Called by:**
-    * **Sera AI Gateway:** In a production environment, the gateway serves the static React frontend assets and proxies all `/api` requests to the FastAPI backend service.
+    * **Sera AI Gateway:** In a production environment, the gateway serves the static React frontend assets and proxies all `/api` requests to the FastAPI backend service. It handles SSL termination, authentication, and injects user identity headers.
     * **Human User (Development):** The FastAPI backend can be launched directly via the `cv_analysis_processor.py` script for local testing.
-* **Interacts with:**
-    * **LLM Service (AI Factory):** The CAP relies on the configured LLM model for its analysis and generation capabilities.
-    * **Shared PostgreSQL Database:** For persistent storage of job positions, candidate data, and analysis results.
-    * **Shared Redis Instance:** Acts as the message broker and result backend for the Celery task queue.
-    * **CAP Celery Worker:** A dedicated, persistent background process that consumes tasks from the Redis queue to perform heavy processing without blocking the user interface, **including primary analysis, transcript processing, and cross-position matching.**
-    * **Shared Assets Storage:** For storing uploaded CVs, extracted text, and other artifacts.
-    * **Sera AI Gateway:** Relies on the gateway for user authentication/authorization and receives user identity via injected HTTP headers (`X-Forwarded-User`, `X-Forwarded-Display-Name`, `X-Forwarded-Groups`).
+* **Core Components:**
+    * **Backend API:** A FastAPI application serving the REST API (`/api/`) and handling logic for the frontend.
+    * **Frontend:** A React SPA (Single Page Application) built with Vite and Material UI.
+    * **Worker Cluster:** A scalable fleet of Celery workers handling asynchronous tasks (PDF parsing, AI inference, Sync).
+* **Integration Points:**
+    * **Workday (ATS):** Connects to Workday RaaS (Report-as-a-Service) for bi-directional synchronization of Jobs and Candidates.
+    * **AI Factory (Inference):** Uses a dedicated **`vLLMClient`** to interface with the internal AI Factory (e.g., Gemma 3 27B) via HAProxy, replacing the legacy Ollama implementation for production-grade throughput.
+    * **PostgreSQL (V3 Schema):** Stores the relational data model, live configuration, and structured audit logs.
+    * **Redis:** Acts as the high-performance broker for the prioritized Task Queue.
+    * **Vault Storage:** All sensitive documents (CVs, transcripts) are stored in a standardized, secure path structure: `/ai/assets/vault/cv_analysis_processor/{job_id}/{filename}`.
+    * **Sera AI Gateway:** Relies on the gateway for authorization via injected HTTP headers (`X-Forwarded-User`, `X-Forwarded-Display-Name`, `X-Forwarded-Groups`).
+
+### 4.1 Data Model (V3 Relational Schema)
+
+The system operates on a normalized "V3" schema designed to eliminate data duplication and support complex candidate relationships.
+
+* **JobPosition (`job_positions`):** The central anchor. Uses the Workday Requisition ID (e.g., `R001472`) as the primary key. Stores metadata, budget, and custom scoring rules.
+* **Candidate (`candidates`):** Represents the human entity. Uses the Workday Candidate ID (e.g., `C-12345`) as the key. Stores immutable personal data (Name, Email, LinkedIn).
+* **Application (`applications`):** Represents the link between a *Candidate* and a *JobPosition*. Stores the context-specific analysis (`overall_assessment`, `score`, `interview_plan`). This allows one candidate to apply to multiple jobs and receive different scores for each.
+* **Artifacts (`application_attachments` & `file_assets`):**
+    * **FileAsset:** A content-addressable storage table keyed by SHA256 hash. Ensures identical files (e.g., the same PDF sent to 3 jobs) are stored only once.
+    * **Attachment:** Links an Application to a FileAsset with a specific classification (`CV`, `COVER_LETTER`, `CERTIFICATE`).
+* **Configuration Tables:** System settings are no longer static files. They are persisted in `system_settings`, `fraud_detection_rules`, and `competitors` tables, allowing real-time updates via the UI.
 
 ---
 
 ## 5. Core Functionality & Process Flow ⚙️
+
+### The Workday Synchronization Engine (Automated Ingestion)
+
+CAP now features a robust, automated synchronization engine that runs hourly to keep the system in sync with the primary ATS (Workday).
+
+* **Scheduled Task:** The `tasks.sync_workday_hourly` Celery task executes automatically. It queries Workday for changes occurring in the last 24 hours to ensure resilience against downtime.
+* **Job Sync:**
+    * Connects to the Workday Job Report (`INT000JR`).
+    * Creates or updates `JobPosition` records in CAP.
+    * Automatically maps fields: Title, Status (Open/Filled/Frozen), Recruiter, Hiring Manager, Worker Type (Regular vs. Contractor), and Country.
+    * **AI Enrichment:** For new jobs, the system automatically runs categorization and key criteria suggestion prompts to populate the initial configuration.
+* **Candidate Sync:**
+    * Connects to the Workday Application Report (`INT000Job_Applications`).
+    * Downloads new CV attachments and links them to the correct Job Position.
+    * **Consent Logic:** Applies region-specific logic to determine if a candidate can be analyzed:
+        * **USA:** Implied consent is assumed; analysis proceeds automatically.
+        * **Rest of World:** Checks the specific `AI_Consent_Question` field.
+* **Smart Status Handling:**
+    * **Consented:** CV is downloaded, hashed, and dispatched to the analysis pipeline.
+    * **Declined (Opt-Out):** A record is created with the status `manual_review` and a grey/neutral icon. The summary explicitly states "Candidate opted out of AI analysis."
+    * **Missing File:** If a candidate consented but the file is corrupt or missing in Workday, a record is created with status `manual_review` and a **red error icon**, flagging it for recruiter attention.
 
 ### The Synchronous CV Analysis Pipeline (`run_cv_analysis`)
 
@@ -265,8 +317,8 @@ This service transforms a single uploaded CV into a comprehensive report through
     * A **Scoring Service** calculates the final quantitative score, assessment bracket, and confidence indicator based on all collected data.
     * A **Distillation** pass extracts the single "Key Strength" and "Top Concern."
     * An **Interview Intelligence** pass generates tailored interview questions and corresponding guidance.
-* **Pass 4 (Asynchronous): Cross-Position Matching:**
-    * After successful completion, a low-priority background task (`find_cross_matches`) is dispatched to Celery to check the candidate against other open roles.
+* **Pass 4: Completion & Downstream Trigger:**
+    * Upon successful completion, the analysis result is persisted to the database with a status of `completed`. This state change automatically makes the candidate eligible for the **Incremental Cross-Match Sweeper**, which evaluates them against other open roles in a separate, asynchronous process.
 
 ### The Asynchronous Re-analysis Worker
 
@@ -277,6 +329,40 @@ Triggered by the "Re-analyze All" button, this system is designed for reliabilit
     2.  **Orchestration:** A Celery worker picks up the main task. It first queries for all source documents, deletes the old analysis results, and creates new placeholder records in the database for each unique document.
     3.  **Parallel Execution:** The orchestrator then dispatches a parallel `analyze_one_cv` sub-task for each new placeholder ID. Multiple Celery workers process these tasks concurrently.
     4.  **Finalization:** Once all sub-tasks are complete, a final `finalize_reanalysis` callback task is triggered to update the job's status in the database, signaling to the UI that the job is complete.
+
+### The Cross-Position Matching Engine (Incremental Sweeper)
+
+This service operates as a decoupled, periodic background process designed to identify and surface candidates who are strong fits for roles other than the one they applied to.
+
+* **Architecture:** A scheduled task (`tasks.run_incremental_cross_match`) executes every 30 seconds. It scans the database for completed analysis results that have not yet been evaluated against other matching open requisitions.
+* **Micro-Batching:** To ensure system stability and prevent resource contention, the sweeper processes candidates in controlled batches (default: 150 items per run).
+* **Priority Management:** All matching tasks are dispatched to the **Priority 0 (Lowest)** queue. This ensures that real-time user uploads and critical sync operations always take precedence over background matching.
+* **Matching Constraints:**
+    * **Country Constraint:** Candidates are only cross-matched against open positions located in the same country code (e.g., a 'GB' candidate is only checked against 'GB' jobs).
+    * **Worker Type:** 'Contingent' (Contractor) positions are excluded from the automatic matching pool.
+* **Backpressure:** The dispatcher monitors the Redis queue depth. If the number of in-flight matching tasks exceeds the configured capacity (3,000 tasks), dispatching pauses to allow the worker cluster to recover.
+
+### Queue Priority & Resource Management
+
+To ensure optimal performance under heavy load, the system utilizes explicit Redis priority queues (Steps 0-9):
+
+* **Priority 9 (Highest):** Real-time User Actions (Manual Uploads, "Re-analyze" button clicks, Feedback submission).
+* **Priority 5 (Medium):** Automated Workday Synchronization.
+* **Priority 0 (Lowest):** Background Cross-Matching and bulk maintenance tasks.
+
+This configuration prevents background "churn" tasks from starving the resources needed for interactive user sessions.
+
+### The Fraud & Risk Engine
+
+Operating alongside the analysis pipeline, this module identifies signals of "Candidate Fraud" or bulk-application farms.
+
+* **Dynamic Rule Engine:** Checks candidate metadata against a database of **Fraud Detection Rules**. These rules can be:
+    * **Domain Blocklists:** Flags emails from known proxy domains (e.g., `nextjob@...`, `fake-agency.com`).
+    * **Regex Patterns:** Identifies suspicious formatting patterns in contact details often used by automated bot farms.
+* **Impact:**
+    * **Tagging:** Flagged candidates receive an automated `Agency Email Pattern` tag and a distinct UI badge.
+    * **Scoring Penalty:** A logic-defined penalty (default `-1.0`) is applied to the final score to reflect the risk level.
+    * **Credibility Impact:** Severe fraud signals (like Prompt Injection) can trigger an immediate override to "Security Flag".
 
 ---
 
@@ -291,7 +377,8 @@ The CAP's UI is a modern Single Page Application (SPA) built with React, Vite, a
 * **Comparison Tool:** A dedicated dialog allows for a head-to-head comparative analysis of selected candidates.
 * **Document Viewer:** An integrated PDF viewer allows viewing CVs directly within the application.
 * **Sharing:** A dialog allows generating secure, time-limited links for sharing reports externally.
-* **Dashboards:** Includes a main overview dashboard and a detailed Recruiter Dashboard.
+* **Dashboards:** * **Main Overview:** Displays high-level metrics, real-time processing speed, and a dedicated **Risk & Compliance** widget  that tracks active fraud flags (Prompt Injections, Agency Patterns) and top feeder companies.
+    * **Recruiter Dashboard:** Provides a personalized view with funnel analytics, "New Strong Candidates," and "Stalled Candidate" alerts.
 * **Settings and Feedback:** The UI includes dedicated pages for managing all application settings and for reviewing and managing user-submitted feedback.
 
 ---
@@ -318,15 +405,7 @@ This section outlines the detailed roadmap for evolving CAP into a fully integra
     1.  **Add a Public Profile Search Pass:** Create an optional step in the pipeline that uses a search API to find professional (LinkedIn) or technical (GitHub) profiles.
     2.  **Summarize Profile Findings:** If a profile is found, use an LLM prompt to summarize it and check for consistency against the submitted CV. Add this summary to the final report.
 
-### 8.2. ATS (Workday) Integration
-* **Status:** **PENDING ACCESS**
-* **Problem:** To fully streamline the workflow, CAP must eventually integrate with the primary system recruiters use daily, eliminating manual data entry.
-* **TODO Plan:**
-    1.  **Develop an ATS Connector Service:** Create a dedicated service to handle API communication with Workday (or other ATS).
-    2.  **Build a Job Sync Feature:** Add functionality to import `JobPosition` data directly from the ATS instead of creating it manually.
-    3.  **Implement Analysis "Push-Back":** Add a "Push to Workday" button that sends the final scores and summary as a note to the candidate's profile in the ATS.
-
-### 8.3. Contextual Scoring based on Role Archetypes
+### 8.2. Contextual Scoring based on Role Archetypes
 * **Status:** **PLANNED**
 * **Description:** This major initiative aims to make the scoring model context-aware by dynamically adjusting the importance of different analysis factors based on a pre-defined "Role Archetype" (e.g., Specialist, Leadership, Graduate). A high `recency_score` might be critical for a Specialist but less so for a Director, whereas `credibility_score` and `career_trajectory` might be paramount for leadership roles.
 * **Implementation Strategy:**
@@ -356,7 +435,7 @@ This section outlines the detailed roadmap for evolving CAP into a fully integra
         * Update score breakdown tooltips to mention the applied archetype profile.
 * **Impact & Benefit:** This will provide a significantly more nuanced and contextually relevant score, better reflecting the differing priorities for various role types (e.g., prioritizing recency for specialists, credibility/stability for leaders).
 
-### 8.4. Full Integration as a SERA Tool
+### 8.3. Full Integration as a SERA Tool
 * **Status:** **LAST STEP**
 * **Problem:** CAP needs to be available as a tool for other automated systems within the SERA ecosystem for broader orchestration.
 * **TODO Plan:**
@@ -364,7 +443,7 @@ This section outlines the detailed roadmap for evolving CAP into a fully integra
     2.  **Create Tool Definition:** Write the `cv_analysis_processor_cap.yaml` file for the Orchestrator's `tools.d/` directory.
     3.  **Deploy Stubs:** Place the compiled gRPC stubs into the shared `/assets/protos/` directory.
 
-### 8.5. AI-Assisted Headhunting (Semantic Search)
+### 8.4. AI-Assisted Headhunting (Semantic Search)
 * **Status:** **PLANNED**
 * **Problem:** The current global search is a simple SQL `LIKE` query. It finds *keywords* (e.g., "managed") but cannot find *concepts* (e.g., a recruiter searching for "team lead" won't find a CV that says "mentored 5 junior developers"). This limits its use for headhunting.
 * **Proposed Solution:** A hybrid search that combines high-speed semantic matching with the rich, structured AI data you already have.
@@ -404,7 +483,7 @@ To make the experience truly seamless, the UI can send the recruiter's natural l
     5.  **Backend:** Create a new API endpoint (`/api/search/headhunt`) in `ui/cap_app.py` that implements the two-phase (ChromaDB -> PostgreSQL) query logic.
     6.  **Frontend:** Build the new "Headhunting Brief" search interface.
 
-### 8.6. Data Retention & Compliance
+### 8.5. Data Retention & Compliance
 * **Status:** **PLANNED**
 * **Problem:** Candidate data (PII) must be purged after 6 months to comply with data retention regulations. However, this policy should ideally apply to *closed* positions, as candidates in long-running, *open* positions can remain relevant.
 * **Proposed Solution:** A two-part, policy-driven data retention strategy.
@@ -429,4 +508,19 @@ To provide a "safety" mechanism and ensure visibility, a new warning will be add
     > "Count all `AnalysisResult` records where `created_at < (now() - 180 days)` AND their associated `JobPosition.status == 'open'`."
 * **UI:** This count will be displayed prominently on the dashboard as a warning (e.g., "⚠️ **Notice:** X candidates in open positions are older than 6 months and may require review."). This alerts recruiters to stale data in active pipelines without automatically deleting potentially relevant candidates.
 
----
+### 8.6. Decoupled Worker Queues for Scalability
+* **Status:** **PLANNED**
+* **Problem:** The current architecture runs all background tasks on a single Celery worker fleet. This creates a resource mismatch:
+    * **PDF Parsing (`marker-pdf`):** Highly CPU and RAM intensive. Requires a limited worker count (e.g., 24) to prevent server overload.
+    * **Cross-Matching & Workday Sync:** Purely I/O bound (waiting on DB or vLLM API). These tasks consume almost no local CPU/RAM but are throttled by the low worker count imposed by the PDF parsers. This results in the high-capacity GPU backend (12x H100) sitting idle while the local queue clears slowly.
+* **Proposed Solution:** Split the processing into two distinct worker fleets with optimized execution pools.
+
+#### 1. Queue Separation
+Configure `core/worker_celery.py` to route tasks based on their resource profile:
+* **`cpu_intensive`:** For `analyze_one_cv` (PDF parsing, OCR).
+* **`io_intensive`:** For `process_cross_match_pair`, `sync_workday_hourly`, and `process_feedback`.
+
+#### 2. Specialized Worker Deployment
+Replace the single `cap-worker` service with two specialized services:
+* **CAP-Worker-CPU:** Runs with the **`pre-fork`** execution pool. Concurrency limited to available CPU cores (e.g., `-c 24`) to handle heavy lifting.
+* **CAP-Worker-IO:** Runs with the **`gevent`** execution pool. Concurrency set extremely high (e.g., `-c 500+`) to handle massive parallelism for API calls and DB operations, saturating the GPU backend without crashing the host.
