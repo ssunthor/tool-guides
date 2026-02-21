@@ -1,7 +1,7 @@
 # Remittance Ingestor (RMI) - Design Document
 
-**Version:** 0.5.0
-**Date:** 2025-11-04
+**Version:** 0.6.0
+**Date:** 2026-02-21
 **Author(s):** Martin Kecka, Gemini AI
 **Category:** Ingestor (I)
 **Acronym:** RMI
@@ -33,6 +33,7 @@ The RMI is a self-contained Python application with a clear separation of concer
 * `core/ingestion.py`: Manages the live production email polling service, using `core/email_handler.py` to fetch new messages.
 * `core/orchestrator.py`: The heart of the application. It manages the end-to-end processing pipeline for a single email, orchestrating the text extraction gauntlet and the subsequent multi-stage analysis.
 * `core/queue_manager.py`: A singleton class that manages the in-memory state of reprocessing and active jobs, exposed via the gRPC API.
+* `core/llm_interface.py`: Handles all interactions with the AI models. It utilizes a `vLLMClient` that communicates with OpenAI-compatible vLLM endpoints (routed via HAProxy) for high concurrency and performance. It includes an `OllamaClient` compatibility wrapper to maintain seamless integration with the existing pipeline steps.
 * `core/pipeline/`: This directory contains the modular, single-responsibility steps that form the processing pipeline, broken into five distinct stages (`a1_...` to `a5_...`).
     * **`a1_extraction/`**: Modules for each text extraction strategy (Excel, OCR, Marker, Nanonets).
     * **`a2_analysis/`**: Modules for core data extraction (customer, payment, invoices, sender).
@@ -42,12 +43,12 @@ The RMI is a self-contained Python application with a clear separation of concer
     * `definitions.py`: The single source of truth for the pipeline's logic, defining the exact sequence of all modules.
 * `prompts/`: A centralized library of all LLM prompt templates, organized by task.
 * `grpc_api/`: Defines and implements the external gRPC interface.
-    * `protos/rmi.proto`: The Protobuf definition file. Now includes `ListRemittances`, `ReprocessRemittance`, `GetRemittanceDetails`, and `GetProcessingStatus`.
+    * `protos/rmi.proto`: The Protobuf definition file. Includes `ListRemittances`, `ReprocessRemittance`, `GetRemittanceDetails`, and `GetProcessingStatus`.
     * `service.py`: The Python implementation of the gRPC server, handling requests and interacting with the `ProcessingQueueManager` and core services.
 * **Data Layer**:
     * `core/database/`: Contains the database connection logic (`database.py`) and the SQLAlchemy ORM data models (`models.py`).
     * `core/io_handlers/`: Modules for handling data persistence (`sql_writer.py`, `sql_reader.py`).
-    * `core/bank_helper.py` & `core/invoice_helper.py`: **Critical helpers that are now database-driven.** They load business rules directly from the `bank_accounts` and `invoice_rules` tables, replacing the old static CSV files.
+    * `core/bank_helper.py` & `core/invoice_helper.py`: **Critical helpers that are database-driven.** They load business rules directly from the `bank_accounts` and `invoice_rules` tables.
 * `config/settings.yaml`: The central configuration file.
 
 ---
@@ -78,7 +79,7 @@ The standard order of attempts is:
 3.  **`ocr`**: Standard Tesseract OCR.
 4.  **`marker-ocr`**: Marker model with OCR forcibly enabled.
 5.  **`marker`**: The most advanced layout-aware model (Marker).
-6.  **`nanonets-transformers`**: (Fallback) A powerful vision-based OCR model.
+6.  **`nanonets-transformers`**: (Fallback) A powerful vision-based OCR model. It interfaces with an OpenAI-compatible remote vLLM endpoint hosting the `Nanonets-OCR2-3B` model, routing requests via HAProxy for scalable image-to-text extraction.
 
 The first method to complete this step without a hard error provides the `raw_text` for all subsequent stages.
 
@@ -94,12 +95,12 @@ The resulting raw text is passed to the A2 analysis pipeline:
 
 ### Step 4: Stage A3 - Enrichment & Programmatic Repair
 
-The extracted data is now cleaned and validated against business rules *from the database*.
+The extracted data is cleaned and validated against business rules sourced from the database.
 
 * **`enrich_bank_details`**: Uses `BankHelper` to look up the extracted `bank_account` and `currency` in the `bank_accounts` DB table, enriching the record with the verified bank name.
 * **`normalize_currency`**: Standardizes the currency string (e.g., "$") to an ISO code (e.g., "USD").
 * **`repair_ocr_invoices`**: Applies a first pass of simple, rule-based string replacements to common OCR errors in invoice numbers (e.g., "1N" -> "IN").
-* **`validate_and_repair_invoices`**: **(Critical Step)** Uses `InvoiceHelper` to validate every single invoice number against the `invoice_rules` DB table. It programmatically repairs numbers, finds the matching Business Unit (BU), and flags any that fail validation for the next stage.
+* **`validate_and_repair_invoices`**: **(Critical Step)** Uses `InvoiceHelper` to validate every single invoice number against the `invoice_rules` DB table. It programmatically repairs numbers, finds the matching Business Unit (BU), and flags any that fail validation for the next stage. It utilizes a "Smart Context Repair" mechanism: if standard validation fails, it scans the raw text line of the invalid number to identify and automatically swap in a valid neighboring invoice number that standard extraction may have missed.
 * **`normalize_invoice_amounts`**: Based on the matched BU's rules, this step enforces the sign of amounts (e.g., ensures all "CR" prefixed invoices are negative).
 
 ### Step 5: Stage A4 - Validation & Correction Loop
@@ -178,14 +179,13 @@ The application's behavior is controlled by `config/settings.yaml`.
 * **`database`**: The DSN connection string.
 * **`paths`**: Proto source and generated stub paths.
 * **`logging`**: Log level and paths.
-* **`msgraph`**: **(New)** Credentials and settings for the production email polling service.
-* **`llm`**: The endpoint for the primary AI model (`gemma3:27b`).
-* **`nanonets_llm`**: **(New)** The endpoint and model name for the Nanonets OCR extractor.
+* **`msgraph`**: Credentials and settings for the production email polling service.
+* **`llm`**: The endpoint configuration for the primary AI model (e.g., `gemma3:27b`). It points to an HAProxy local address (`http://127.0.0.1:8080`) that routes to an OpenAI-compatible vLLM chat completions API, supporting standard request formatting and robust timeout/SSL configurations.
+* **`nanonets_llm`**: The endpoint and model name for the Nanonets OCR extractor. It points to the HAProxy router serving the `vllm-nanonets-ocr2-3b` model via the standard OpenAI chat completions format.
 * **`output`**: Directories for temp files and permanent artifacts.
 * **`company_info`**:
     * `our_banks`: List used by the LLM for entity recognition.
-    * `internal_email_domains`: **(New)** List used by the `refine_sender_email` step.
-    * `bank_master_csv_path`: (Deprecated, no longer used by `bank_helper.py`).
+    * `internal_email_domains`: List used by the `refine_sender_email` step to differentiate external senders from internal forwards.
 
 ---
 

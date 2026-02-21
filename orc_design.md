@@ -1,7 +1,7 @@
 # Oracle Connector (ORC) - Design Document
 
-**Version:** 1.0.0
-**Date:** 2025-11-30
+**Version:** 1.1.0
+**Date:** 2026-02-21
 **Author(s):** Martin Kecka, Gemini AI
 **Category:** Connector (C)
 **Acronym:** ORC
@@ -24,11 +24,6 @@ The ORC focuses on three primary functions:
 
 The ORC is a Python application exposing a `click` CLI for management/discovery and a `gRPC` server for runtime operations.
 
-
-
-[Image of Oracle Connector Hybrid Architecture]
-
-
 ### Core Components
 
 * `oracle_connector.py`: The application entry point (bootstrapping, logging, CLI launch).
@@ -36,14 +31,18 @@ The ORC is a Python application exposing a `click` CLI for management/discovery 
 * **Communication Layer:**
     * `core/rest_client.py`: Handles JSON interactions. Features custom pagination loops ("Search Light, Fetch Heavy") to overcome Oracle REST filtering limitations.
     * `core/soap_client.py`: Wraps `zeep` to handle BI Publisher and AR Service interactions. Implements the custom `UsernameTokenWithTimestamp` required by Oracle's WS-Security.
-* **Data Processing:**
+* **Data Processing & Utilities:**
     * `core/parsers/oracle_xml_parser.py`: Uses `xml.etree` and `pandas` to flatten complex BI Publisher XML hierarchies into linear datasets.
     * `core/parsers/mt940_parser.py`: (In Development) specialized Regex parser for extracting Swift MT940 bank statement tags (`:61:`, `:86:`) from text blobs.
+    * `core/report_processors.py`: Post-processes Master Data reports (e.g., filtering out inactive BUs, dummy banks, and POBO accounts from bank account mapping).
+    * `utils/logging_setup.py`: Manages root logging, rotating file handlers for app and error logs.
+    * `utils/rpc_transaction_logger.py`: Automatically logs all inbound gRPC requests and outbound responses to timestamped JSON files for audit trails.
 * **Discovery Module:**
     * `core/rest_inspector.py`: Downloads and indexes Oracle REST API catalogs (`/describe`).
     * `core/wsdl_inspector.py`: Introspects SOAP WSDLs to generate human-readable summaries of available services and types.
 * **gRPC Layer:**
-    * `grpc_api/protos/orc.proto`: Defines the strict contract for interactions (e.g., `FindReceiptByInvoice`).
+    * `grpc_api/protos/orc.proto`: Defines the strict contract for interactions (e.g., `FindReceiptByInvoice`, `ApplyCreditMemo`).
+    * `grpc_api/generate_stubs.py`: Automates the compilation of protobuf stubs (`orc_pb2.py`, `orc_pb2_grpc.py`) directly before server initialization to ensure schema sync.
     * `grpc_api/service.py`: The servicer that orchestrates calls between the gRPC request, the appropriate Client (REST vs. SOAP), and the Parsers.
 
 ---
@@ -57,9 +56,15 @@ The gRPC service abstracts the underlying protocol (REST vs SOAP) from the consu
 | Method | Protocol | Description | Logic Pattern |
 | :--- | :--- | :--- | :--- |
 | `GetBankStatements` | **SOAP** | Fetches MT940 bank statements for a date range. | Run BI Report $\rightarrow$ XML Parse $\rightarrow$ MT940 Parse |
-| `CreateStandardReceipt` | **REST** | Creates an AR receipt (e.g., for batch payments). | Direct POST |
-| `GetStandardReceipts` | **REST** | Fetches detailed data for a list of Receipt Numbers. | Direct GET (Loop) |
+| `CreateStandardReceipt` | **Hybrid** | Creates an AR receipt (e.g., for batch payments) and applies it to an invoice. Includes automated Cross-BU IC Bridging. | Direct POST (REST) $\rightarrow$ Apply (SOAP) |
+| `CreateUnappliedReceipt`| **REST** | Creates a standalone unapplied AR receipt. | Direct POST |
+| `GetStandardReceipts` | **REST** | Fetches detailed data for a list of Receipt Numbers or a specific ID. | Direct GET (Loop) |
 | `FindReceiptByInvoice` | **REST** | Finds which receipt covers a specific invoice. | **Pagination Loop:** Query by BAN (Newest First) $\rightarrow$ Client-side Filter |
+| `FindInvoicesByBan` | **REST** | Retrieves open invoices for a specific Customer Account (BAN). | Query with finder (`invoiceSearch`) |
+| `GetInvoiceDetails` | **REST** | Fetches standard details for a specific invoice number. | Auto-resolve ID $\rightarrow$ Direct GET |
+| `GetCreditMemoDetails`| **SOAP/REST**| Retrieves credit memo history and application statuses. | Run BI Report $\rightarrow$ Smart Link Processing |
+| `ApplyCreditMemo` | **Hybrid** | Applies a credit memo to a specific invoice balance. | Auto-resolve IDs (REST) $\rightarrow$ Apply (SOAP) |
+| `UnapplyCreditMemo` | **SOAP** | Unapplies a specific receivable application ID. | Direct SOAP Call |
 
 ### 3.2. "Search Light, Fetch Heavy" Pattern
 
@@ -68,12 +73,24 @@ To circumvent Oracle REST API limitations (specifically the inability to filter 
 2.  **Scan:** Iterate through the results client-side, expanding child resources (`remittanceReferences`) where possible.
 3.  **Fetch:** Only when a match is found locally is the full, heavy payload fetched for the specific object ID.
 
-### 3.3. Discovery & introspection
+### 3.3. Discovery & Introspection
 
 The ORC treats the ERP schema as dynamic. The `discover` CLI group allows developers to map the environment:
 * `discover init`: Downloads the latest WSDLs and REST Catalogs from the target environment.
 * `discover search <keyword>`: Searches local cached definitions to find API endpoints and attribute types without needing to browse Oracle documentation.
 * `discover inspect <resource>`: Shows the exact structure, mandatory fields, and children of a resource.
+
+### 3.4. Cross-BU Inter-Company (IC) Bridge Logic
+
+When executing `CreateStandardReceipt`, the ORC employs a Hybrid flow: creating the receipt header via REST, then applying it via SOAP. If Oracle returns a Cross-BU error (e.g., "receipt business unit can't process payments" or "cross currency"), the ORC automatically orchestrates an IC Bridge:
+1. Extracts source and target Business Unit IDs.
+2. Performs a SOAP Write-Off on the original receipt against an IC Activity Account.
+3. Generates a Child Receipt (`[ReceiptNumber]-IC`) in the target BU via REST.
+4. Applies the newly created Child Receipt to the target Invoice via SOAP.
+
+### 3.5. Smart Credit Memo Processing
+
+For `GetCreditMemoDetails`, the ORC combines SOAP reporting with active logic. It parses the BI Publisher report for the CM, groups applications by Invoice ID, calculates the net balance, and tags historical rows with `ORC_LINK_STATUS` (`ACTIVE`, `HISTORY`, `CONTRIBUTING`). If the report is empty, it falls back to a REST query to verify the CM's existence, returning a clean state.
 
 ---
 
@@ -116,6 +133,15 @@ The `orc_cli.py` provides distinct groups for different business domains:
 
 # Reports: Manually run a BI Publisher report and save XML
 ./oracle_connector.py reports run "/Custom/Financials/MyReport.xdo" --output test.xml
+
+# Master Data: Fetch and filter active Bank Accounts to local cache
+./oracle_connector.py master-data bank-accounts --save
+
+# Invoices: List open invoices for a specific Customer Account (BAN)
+./oracle_connector.py invoices list-by-ban --ban "T174216" --full
+
+# Credit Memos: Apply a specific Credit Memo to an Invoice
+./oracle_connector.py credit-memos apply --cm "CM-9901" --inv "IN12345" --amount 500.00
 ```
 
 Here is the updated Section 6 for the orc_design.md file, aligned with the architectural standards and depth of the CMC reference document.

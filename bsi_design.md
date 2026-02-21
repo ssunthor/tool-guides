@@ -1,7 +1,7 @@
 # Bank Statement Ingestor (BSI) - Design Document
 
-**Version:** 0.1.0
-**Date:** 2025-11-04
+**Version:** 0.5.0
+**Date:** 2026-02-21
 **Author(s):** Gemini AI
 **Category:** Ingestor (I)
 **Acronym:** BSI
@@ -31,90 +31,87 @@ This process transforms raw, bank-specific files into a clean, unified, and quer
 The BSI is a self-contained Python application built with a clear, modular architecture.
 
 * `bank_statement_ingestor.py`: The main entry point that loads configuration, sets up logging, and launches the command-line interface (CLI).
-* `cli/bsi_cli.py`: The `click`-based CLI. This is the primary user-facing tool for managing the service, providing commands to `init-db`, `start-grpc-server`, `process-local-statements`, `view-statements`, and `reprocess-statement`.
-* `core/orchestrator.py`: The heart of the processing logic. It manages the processing of a single file (`process_single_file`) by selecting the correct converter. It also contains the logic for scanning the local input directory (`process_local_directory`).
-* `core/services.py`: The business logic layer that sits between the interfaces (CLI/gRPC) and the orchestrator.
-    * `process_uploaded_statement`: Handles the full lifecycle of a gRPC upload, including saving the temp file, detecting the bank, calling the orchestrator, and archiving the file.
+* `cli/bsi_cli.py`: The `click`-based CLI. This is the primary user-facing tool for managing the service, providing commands to `init-db`, `start-grpc-server`, `upload-statement`, `view-statements`, `reprocess-statement`, and launching the continuous `start-poller`. It also includes nested groups for `analysis` and `dev` tools.
+* `core/orchestrator.py`: The heart of the processing logic. It manages the processing of a single file (`process_single_file`) by selecting the correct converter based on a dynamic `PARSER_REGISTRY`. It also contains the logic for scanning the local input directory (`process_local_directory`).
+* `core/ingestion_manager.py`: Manages the continuous, automated polling of remote SFTP servers. It scans for new files, applies lookback filters, syncs related addenda files, triggers the orchestrator, and archives processed files to the vault.
+* `core/services.py`: The business logic layer that sits between the interfaces (CLI/gRPC/Poller) and the orchestrator.
+    * `process_manual_upload`: Handles the full lifecycle of a manual file upload (local or gRPC), including syncing addenda, bank detection, orchestration, archiving, and triggering database writes.
     * `reprocess_statement_by_file_id`: Implements the complex logic for reprocessing, which involves finding the original file in the archive based on DB data, re-parsing it, and updating the database records.
-    * `_detect_bank`: A helper to sniff file headers (CSV or XLSX) to determine the bank format.
-* `core/converters/`: A directory of bank-specific parsers.
-    * `deutsche_bank_converter.py`: Parses the specific CSV format from Deutsche Bank.
-    * `bank_of_america_converter.py`: Parses a specific XLSX format from Bank of America.
+    * `reapply_invoice_parsing_rules`: A database-only operation that re-extracts invoice candidates from raw text without requiring a full file re-parse.
+* `core/converters/` & `core/parsers/`: Directories of bank-specific parsers and data structure converters.
+    * `deutsche_bank`: Parses the specific MT940 format from Deutsche Bank.
+    * `bank_of_america`: Parses BAI2 (US and EMEA) and custom XLSX formats from Bank of America.
+    * `danske_bank`: Parses specific MT940 format from Danske Bank.
+    * `itau_bank`: Parses specific MT940 format from Itaú Unibanco.
+    * `ubb_bank`: Parses specific MT940 format from UBB.
+    * `jsc_otp_bank`: Parses specific MT940 format from JSC OTP.
+* `core/enrichers/`: Modules that augment raw parsed data.
+    * `bofa_enricher.py`: Ingests auxiliary `.dat` addenda files (Lockbox, ACH, Wire) to inject highly accurate Payer Names, Account Numbers, and Invoice matches into standard BoA transactions.
+* `core/analysis/`: A suite of deep-dive QA and development tools.
+    * `invoice_qa.py`, `payer_qa.py`, `transaction_code_analyzer.py`, `rule_validator.py`, `local_parser.py`, `ingestion_stats.py`.
+* `core/connectors/`: Interfaces for external system communication.
+    * `cmd_connector.py`: A gRPC client that connects to the central Cash Management Database (CMD) to validate extracted invoice numbers and fetch rich metadata (e.g., Client Names for missing payers).
+    * `sftp_connector.py`: A robust wrapper around `paramiko` for secure file discovery and downloading.
 * `grpc_api/`: Defines and implements the external gRPC interface.
-    * `protos/bsi.proto`: The Protobuf definition file, defining `ProcessBankStatement` and `ExtractDeutscheBankAccounts` services.
-    * `service.py`: The Python implementation of the gRPC server that listens for and handles incoming requests.
+    * `protos/bsi.proto`: The Protobuf definition file.
+    * `services.py` & `generate_stubs.py`: Auto-generates stubs on startup and hosts the Python implementation of the gRPC server.
 * **Data Layer (Shared DB):**
-    * `core/database/`: Contains `database.py` (engine/session management) and `models.py` (SQLAlchemy ORM definitions).
-    * `core/io_handlers/`: Modules for all database interaction. `sql_writer.py` handles saving all parsed data, and `sql_reader.py` is used by the `view-statements` CLI.
-* **Enrichment Helpers (DB-Driven):**
-    * `core/branch_helper.py`: A singleton class that queries the `bank_accounts` table to find the correct `branch_name` based on an account number.
-    * `core/invoice_parser_helper.py`: A singleton class that queries `bank_accounts` -> `business_units` -> `invoice_rules` to fetch the correct regex patterns (prefix/length) for a given account, then uses them to extract invoice numbers from raw transaction text.
-* `scripts/map_management.py`: A set of utility scripts, exposed via the CLI, for development and analysis (e.g., analyzing static mapping files, extracting unique DB accounts from archives).
-* `config/settings.yaml`: The central configuration file.
+    * `core/database/`: Contains `database.py` (engine/session management) and `models.py` (SQLAlchemy ORM definitions including `bsi_statement_files`, `bsi_transactions`, `daily_account_balances`, and linkages to `physical_bank_accounts`).
+    * `core/io_handlers/`: Modules for all database interaction. `sql_writer.py` handles saving all parsed data (including smart merging and orphan deletion during reprocessing), and `sql_reader.py` handles data retrieval.
+* **Enrichment Helpers (DB-Driven & CMD-Driven):**
+    * `core/branch_helper.py`: A singleton class that resolves human-readable branch names using static mappings and database lookups.
+    * `core/invoice_parser_helper.py`: A singleton class that queries `invoice_rules` to fetch correct regex patterns, resolving complex split/truncated invoice text into clean candidates.
+    * `core/invoice_validator.py`: Takes candidates found by the parser helper, calls the `cmd_connector` to verify their existence in the financial system, prunes invalid "noise", and backfills missing Payer Names based on validated invoice metadata.
+* `config/settings.yaml`: The central configuration file managing DB, gRPC, SFTP, Polling intervals, and dynamic Bank Profiles.
+* `scripts/map_management.py`: *(Deprecated)* Legacy utility scripts, now fully replaced by live database rules and the `core/analysis` suite.
 
 ---
 
 ## 3. How a Bank Statement is Processed
 
-The BSI processes files via two main workflows: gRPC upload (real-time) or local directory scanning (batch).
+The BSI processes files via four main workflows: gRPC upload, Local Directory scanning, Reprocessing, and Continuous SFTP Polling.
 
-### Workflow 1: gRPC Upload
+### Workflow 1: gRPC Upload (Real-Time)
+1.  **Ingestion:** The `grpc_api/services.py` server receives a request containing the `filename` and raw `file_content` (bytes), saving it to a temporary location.
+2.  **Addenda Sync (Conditional):** If detected as a Bank of America format, `services.process_manual_upload` connects via SFTP to download any matching `.dat` addenda files.
+3.  **Bank Detection:** Sniffs the file content to identify the bank format (e.g., MT940, BAI2, XLSX).
+4.  **Orchestration:** `core/orchestrator.process_single_file` calls the correct converter.
+5.  **Conversion & Pre-Enrichment:** The converter parses the file into transactions. For BoA, the `BofaEnricher` merges the `.dat` addenda into the transactions. `InvoiceParserHelper` extracts potential invoice candidates, and `BankBranchHelper` resolves the branch.
+6.  **Archiving:** The file (and any supporting addenda) is copied to a permanent, date-stamped vault location.
+7.  **Database Write:** Structured data is passed to `sql_writer.save_statement_data` to create/update the statement header, insert transactions, and update daily balances.
+8.  **Validation & Pruning:** `invoice_validator.validate_and_prune` runs asynchronously. It batches all extracted invoice candidates, sends them to the `cmd_connector`, prunes invalid matches (noise), and enriches the `payer_name` based on the validated invoice client data.
 
-This is the primary flow for new, individual files.
-
-1.  **Ingestion:** The `grpc_api/service.py` server receives a `ProcessBankStatementRequest`, which contains the `filename` and raw `file_content` (bytes).
-2.  **Temp Storage:** `core/services.process_uploaded_statement` saves the file bytes to a temporary location specified by `paths.temp_files_dir`.
-3.  **Bank Detection:** `services._detect_bank` is called. It opens the temp file and sniffs its content (e.g., checking for `'Account No'` and `'Bank/Branch'` in a CSV header for Deutsche Bank) to identify the bank format.
-4.  **Orchestration:** `core/orchestrator.process_single_file` is called with the temp file path and the detected `bank_name`.
-5.  **Conversion & Enrichment:** The orchestrator selects the correct converter (e.g., `deutsche_bank_converter.parse_statement`) from its `CONVERTER_MAP`. The converter:
-    a.  Reads the file (e.g., `pandas.read_csv`).
-    b.  Groups transactions by `Account No`.
-    c.  For each transaction, it calls `InvoiceParserHelper.extract_invoices` to find invoice numbers by querying the live `invoice_rules` table in the DB.
-    d.  For each account, it calls `BankBranchHelper.get_branch_name` to find the branch name from the `bank_accounts` table.
-    e.  It structures this data into a `summary` (header) and `transactions` (lines) for each account.
-6.  **Database Write:** The structured data is passed to `core/io_handlers/sql_writer.save_statement_data`. This function:
-    a.  Creates one `BsiStatementFile` record for each account's `summary`.
-    b.  Inserts all `BsiTransaction` records, linking them via the new `file_id`.
-    c.  Upserts the `opening_balance` and `closing_balance` into the `daily_account_balances` table, using a unique constraint on (account, currency, date).
-7.  **Archiving:** If the process is successful, `services.process_uploaded_statement` copies the temp file to a permanent, date-stamped archive location (e.g., `/ai/assets/csv/bsi/deutsche_bank/2025/11/11.04.2025.csv`).
-8.  **Cleanup:** The temporary file is deleted.
-
-### Workflow 2: Local Directory Scan
-
-This flow is triggered by the `process-local-statements` CLI command.
-
+### Workflow 2: Local Directory Scan (Batch/Dev)
 1.  **Trigger:** `cli/bsi_cli.py` calls `core/orchestrator.process_local_directory`.
-2.  **Scan:** The orchestrator walks the nested directory structure defined in `paths.local_input_dir` (e.g., `.../input/<bank_name>/<year>/<month>/<file.csv>`).
-3.  **Process:** For each file found, it calls `orchestrator.process_single_file` using the directory name as the `bank_name`.
-4.  **Conversion & Storage:** Steps 5 and 6 from the gRPC workflow are executed. (Note: This workflow does not include the Archiving step, as the files are already in a structured location).
+2.  **Scan:** Walks the nested directory structure defined in `paths.local_input_dir`.
+3.  **Process:** For each file found, executes Steps 4, 5, 7, and 8 from the gRPC workflow using the directory name as the `bank_name`.
 
 ### Workflow 3: Reprocessing
+1.  **Trigger:** `reprocess-statement --file-id <UUID>` CLI command is executed.
+2.  **Lookup:** Queries `bsi_statement_files` to find the bank name, date, and original vaulted filename.
+3.  **Re-Parse:** Opens the *archived* vault file and reparses it entirely using the updated converter logic.
+4.  **Smart Merge:** Calls `sql_writer.save_statement_data` in **reprocess mode**. This preserves existing transaction UUIDs where possible, deletes orphaned records, inserts new ones, and recalculates integrity checks.
+5.  **Re-Validate:** Triggers the `invoice_validator` to verify any newly extracted invoices against the CMD.
 
-This flow is triggered by the `reprocess-statement --file-id <UUID>` CLI command.
-
-1.  **Trigger:** `cli/bsi_cli.py` calls `core/services.reprocess_statement_by_file_id` with the UUID.
-2.  **Find Record:** The service queries the `bsi_statement_files` table for the provided `file_id` to get its `source_bank_name` and `statement_date`.
-3.  **Find Archive File:** It constructs the expected archive file path (e.g., `/ai/assets/csv/bsi/deutsche_bank/2025/11/11.04.2025.csv`) based on the bank and date.
-4.  **Re-Parse:** It calls the correct converter (e.g., `deutsche_bank_converter.parse_statement`) to parse the *entire* archived file. This file may contain data for *multiple* accounts.
-5.  **Find Related Records:** The service queries the DB again to find *all* `BsiStatementFile` records that share the same `source_bank_name` and `statement_date`. It builds a map of `{account_number: existing_file_id}`.
-6.  **Update Database:** It iterates through the newly parsed data, account by account:
-    a.  It finds the `existing_file_id` for the current account using the map.
-    b.  It calls `sql_writer.save_statement_data` in **reprocess mode** (passing the `existing_file_id`).
-    c.  The `sql_writer` first **deletes all existing `BsiTransaction` records** for that `file_id` before inserting the new ones and updating the `BsiStatementFile` header. This ensures no duplicate data.
+### Workflow 4: Continuous SFTP Polling (Automated Ingestion)
+1.  **Trigger:** The `start-poller` CLI command initiates the `IngestionManager`.
+2.  **Interval Management:** Sleeps based on `poller.interval_seconds`, using tighter intervals during peak "Rush Hours".
+3.  **Remote Scan:** Connects to bank-specific SFTP paths defined in `settings.yaml` (`bank_profiles`). Lists files, applying a lookback window (e.g., last 7 days) and regex filtering.
+4.  **Delta Check:** Queries the database (`sql_reader.get_existing_filenames_global`) to filter out files that have already been ingested.
+5.  **Download & Process:** Downloads new files (and associated addenda) to the temp directory. Executes the orchestration, writing, archiving, and validation steps identical to Workflow 1.
 
 ---
 
 ## 4. Key Features & Functionality
 
-* **gRPC API**: Provides a `ProcessBankStatement` endpoint for real-time, programmatic file uploads and a `ExtractDeutscheBankAccounts` helper endpoint.
-* **Modular Bank Converters**: A clean `core/converters` architecture allows new banks to be supported by adding a new parser file.
-* **CLI Management Suite**: A robust `click` CLI for all administrative tasks, including database initialization, manual processing, data viewing, and reprocessing.
-* **Live DB-Driven Enrichment**:
-    * **Invoice Parsing**: Uses `InvoiceParserHelper` to query the shared `invoice_rules` table (managed by CAA) to dynamically extract invoice numbers from transaction text.
-    * **Branch Resolution**: Uses `BranchHelper` to query the shared `bank_accounts` table to resolve cryptic branch codes into human-readable branch names.
-* **Robust Reprocessing**: A dedicated service (`reprocess-statement`) allows developers to update parsing logic, run the reprocessing command, and fix data in the database without manual intervention.
-* **Daily Balance Tracking**: Populates and maintains a `daily_account_balances` table, providing a clean, time-series-ready view of account balances.
-* **File Archiving**: Automatically archives successfully processed uploads to a permanent, date-structured directory for auditing and reprocessing.
+* **Continuous SFTP Poller**: An automated background worker (`IngestionManager`) that actively monitors remote bank servers, dynamically adjusting its polling interval based on peak business hours, and strictly ensuring no duplicate files are ingested.
+* **Intelligent Addenda Merging**: Specifically for complex banks (like Bank of America), BSI downloads raw `.dat` lockbox/wire addenda files and perfectly reconciles them against summary transactions in the main statement, exploding them into individual line items with rich payer metadata.
+* **CMD Validation & Noise Pruning**: Extracted invoice candidates are not trusted blindly. BSI communicates with the central Cash Management Database (CMD) via gRPC to validate every candidate. Invalid regex matches are automatically pruned, guaranteeing 100% downstream accuracy for the CAA.
+* **Payer Reverse-Enrichment**: If a bank transaction lacks a payer name but contains a valid invoice number, BSI uses the `cmd_connector` to reverse-lookup the invoice owner and dynamically backfills the missing `payer_name` field.
+* **gRPC API & Auto-Stubs**: Provides endpoints for programmatic file uploads. The server automatically checks and compiles Protobuf stubs on startup to ensure interface synchronization.
+* **Deep Analysis & QA Suite**: A powerful set of CLI tools (`analysis` group) that allows developers to run safe, local simulations against production data. This includes rule validation, transaction code gap analysis, payer extraction audits, and noise/pruning reports.
+* **Modular Bank Converters**: A clean `core/converters` architecture supports Deutsche Bank, Bank of America (US/EMEA/XLSX), Danske Bank, Itaú Unibanco, UBB, and JSC OTP.
+* **Robust Reprocessing & Delta Merging**: Allows developers to update parsing logic and run the reprocessing command. The system automatically preserves transaction IDs, deletes orphans, and safely updates data without breaking downstream CAA linkages.
 
 ---
 
@@ -149,48 +146,73 @@ The BSI module both writes to its own tables and reads from shared CAA tables wi
 
 The application's behavior is controlled by `config/settings.yaml`.
 
-* **`grpc_server`**: Port (`50052`) and max worker settings.
+* **`grpc_server`**: Host, Port (`50052`), and max worker settings for the inbound upload API.
+* **`cmd_connector`**: Host and Port (`50053`) for outgoing verification requests to the CMD system.
 * **`database`**: The DSN connection string for the PostgreSQL database.
+* **`sftp`**: Global connection credentials (host, port, username, RSA key path) for remote bank servers.
+* **`poller`**: Controls the `IngestionManager` behavior (enabled status, interval seconds, lookback days).
+* **`bank_profiles`**: Dynamic dictionary controlling which banks are active. Maps a `parser_id` to its specific `remote_path`, `addenda_path`, and `filename_pattern` regex.
 * **`paths`**:
-    * `local_input_dir`: Path for the `process-local-statements` command.
-    * `temp_files_dir`: Location for transient upload files.
-    * `generated_stubs_path`: Shared path for gRPC stub files.
-* **`logging`**: Log level, directory, and filenames.
+    * `local_input_dir`: Path for the batch processing command.
+    * `temp_files_dir`: Transient location for downloads and uploads.
+    * `vault_dir`: Permanent, date-partitioned archive for all successfully processed files.
+    * `dev_tests_dir`: Root directory for local QA simulations and output reports.
+    * `generated_stubs_path` & `cmc_generated_stubs_path`: Paths for auto-generated Protobuf files.
+* **`logging`**: Log level, directory, and daily rotating filenames.
 
 ---
 
 ## 7. Command-Line Interface (CLI) Usage
 
-The main entry point is `bank_statement_ingestor.py`.
+The main entry point is `bank_statement_ingestor.py`. It utilizes a robust `click` interface with main commands and specialized sub-groups (`analysis`, `dev`).
 
 [bash]
-# Initialize the database (drops and recreates BSI tables)
+# --- Core Services ---
+# Initialize the database (drops and recreates BSI tables safely)
 ./bank_statement_ingestor.py init-db
 
-# Start the gRPC server to listen for uploads
+# Start the inbound gRPC server to listen for uploads
 ./bank_statement_ingestor.py start-grpc-server
 
-# Process all files in the local input directory
-./bank_statement_ingestor.py process-local-statements
+# Start the continuous SFTP background poller
+./bank_statement_ingestor.py start-poller
 
-# View ingested statements with filters
-./bank_statement_ingestor.py view-statements
+# --- Manual Operations ---
+# Manually upload and ingest a file (automatically determines bank/archiving)
+./bank_statement_ingestor.py upload-statement --file "/path/to/statement.xlsx"
+
+# Reprocess a specific statement file from the archive using its DB UUID
+./bank_statement_ingestor.py reprocess-statement --file-id "a1b2c3d4-..."
+
+# View ingested statements with granular filters
 ./bank_statement_ingestor.py view-statements --account "00039429000"
 ./bank_statement_ingestor.py view-statements --filename "11.04.2025"
 
-# Reprocess a specific statement file from the archive
-./bank_statement_ingestor.py reprocess-statement --file-id "a1b2c3d4-..."
+# View recent ingestion events timeline and addenda linkage
+./bank_statement_ingestor.py ingestion-stats --limit 20
 
-# --- Utility Commands ---
+# Deep inspection of a single transaction (dumps all columns and tests live extraction)
+./bank_statement_ingestor.py inspect-tx --tx-id "b1c2..."
 
-# (Re)Generate the static invoice rule JSON from the company CSV
-./bank_statement_ingestor.py generate-invoice-map
+# --- QA & Analysis Suite (analysis group) ---
+# Analyzes local files to find transactions where Payer Name extraction failed
+./bank_statement_ingestor.py analysis payer-qa --bank "deutsche_bank" --direction CREDIT
 
-# Analyze local statement files against the static rule JSON
-./bank_statement_ingestor.py analyze-account-map deutsche_bank
+# Analyzes transaction codes across local files to identify missing dictionary mappings
+./bank_statement_ingestor.py analysis code-qa --unknown-only
 
-# Extract unique account details from local files
-./bank_statement_ingestor.py extract-db-accounts
+# Simulates full extraction and CMD validation, generating a deep-dive Pruning/Noise report
+./bank_statement_ingestor.py analysis qa-extraction --test-data
+
+# Evaluates configuration coverage by matching DB accounts to local file contents
+./bank_statement_ingestor.py analysis validate-rules --test-data
+
+# --- Development Tools (dev group) ---
+# Dry-run SFTP connection to list or download files without saving to DB
+./bank_statement_ingestor.py dev test-sftp-parse deutsche_bank --latest --days 3
+
+# Parses local files and generates detailed JSON outputs for manual inspection
+./bank_statement_ingestor.py dev local-parse danske_bank
 [/bash]
 
 ## 8. Future Enhancements
