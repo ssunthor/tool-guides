@@ -191,7 +191,7 @@ The application's behavior is controlled by `config/settings.yaml`.
 
 ## 7. Command-Line Interface (CLI) Usage
 
-[bash]
+```bash
 # Initialize the database schema
 ./remittance_ingestor.py init-db
 
@@ -217,7 +217,7 @@ The application's behavior is controlled by `config/settings.yaml`.
 
 # Generate a high-level summary of the latest test run
 ./remittance_ingestor.py summary
-[/bash]
+```
 
 ## 8. Future Enhancements
 

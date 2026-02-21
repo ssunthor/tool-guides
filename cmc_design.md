@@ -109,7 +109,7 @@ The `CmdClient` is built for reliability:
 
 The `cmc_cli.py` module uses `click` to provide core developer commands:
 
-[bash]
+```bash
 # Start the gRPC server (primary mode of operation, dynamically generates stubs if needed)
 ./cmd_connector.py start-grpc-server
 
@@ -137,7 +137,7 @@ The `cmc_cli.py` module uses `click` to provide core developer commands:
 
 # Fetch recent ERP transactions/invoices for a specific Billing Account Number (BAN)
 ./cmd_connector.py list-invoices --ban "T194919" --months 6
-[/bash]
+```
 
 ## 6. Future Enhancements
 

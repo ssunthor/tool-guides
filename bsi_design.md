@@ -166,7 +166,7 @@ The application's behavior is controlled by `config/settings.yaml`.
 
 The main entry point is `bank_statement_ingestor.py`. It utilizes a robust `click` interface with main commands and specialized sub-groups (`analysis`, `dev`).
 
-[bash]
+```bash
 # --- Core Services ---
 # Initialize the database (drops and recreates BSI tables safely)
 ./bank_statement_ingestor.py init-db
@@ -213,7 +213,7 @@ The main entry point is `bank_statement_ingestor.py`. It utilizes a robust `clic
 
 # Parses local files and generates detailed JSON outputs for manual inspection
 ./bank_statement_ingestor.py dev local-parse danske_bank
-[/bash]
+```
 
 ## 8. Future Enhancements
 
