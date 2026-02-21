@@ -524,3 +524,15 @@ Configure `core/worker_celery.py` to route tasks based on their resource profile
 Replace the single `cap-worker` service with two specialized services:
 * **CAP-Worker-CPU:** Runs with the **`pre-fork`** execution pool. Concurrency limited to available CPU cores (e.g., `-c 24`) to handle heavy lifting.
 * **CAP-Worker-IO:** Runs with the **`gevent`** execution pool. Concurrency set extremely high (e.g., `-c 500+`) to handle massive parallelism for API calls and DB operations, saturating the GPU backend without crashing the host.
+
+### 8.7. Switch from Marker to Nanonets (GPU Offloading)
+* **Status:** **PLANNED**
+* **Problem:** The `marker-pdf` library, while accurate, is causing significant CPU bottlenecks and timeouts (`SoftTimeLimitExceeded`) on complex or corrupted PDFs when running on CPU-only worker nodes. Local fixes (Ghostscript, Rasterization) add overhead without solving the root compute constraints.
+* **Solution:** Replace the local `marker-pdf` implementation with a remote call to the **Nanonets** extraction model running on the cluster's **H100 GPUs** (via vLLM/Triton).
+* **Impact & Benefits:**
+    * **Eliminates Timeouts:** Offloading heavy OCR/Vision tasks to an H100 reduces processing time from 30+ minutes to seconds.
+    * **Scalability:** The Celery workers become lightweight I/O clients, allowing massive concurrency (500+ workers) without CPU saturation. This effectively solves the bottleneck described in 8.6.
+    * **Robustness:** Isolates the "messy PDF" problem to the dedicated inference server, preventing worker crashes.
+* **Requirements:**
+    * **Accuracy Testing:** Rigorous benchmarking is required to ensure the Nanonets model matches or exceeds the high extraction quality currently provided by `marker`.
+    * **Integration:** Development of a new `vLLMClient` or specialized client to handle binary file uploads to the inference endpoint.
