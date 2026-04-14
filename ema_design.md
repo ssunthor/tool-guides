@@ -2,9 +2,9 @@
 ## Email Assistant (EMA) - Design Document
 
 **Version:** 0.5  
-**Date:** 2025-08-09  
+**Date:** 2026-03-16  
 **Author(s):** Martin Kecka, Gemini AI
-**Category:** Assistant (A)
+**Category:** Assistant (A) / Gateway
 **Acronym:** EMA (Email Assistant)
 **Microsoft Exchange Online email account:** `sera-ai@gtt.net`
 
@@ -14,13 +14,13 @@ The EmailTool module is an AI-powered assistant named "Sera - SysEng Reasoning A
 
 This module is designed to act as an intelligent virtual assistant, capable of answering questions and providing information based on the content of the emails it receives and its general knowledge from the LLM.
 
-This is a prototype standalone module. The functionality described herein is intended to be refactored and integrated as a specialized, external tool within the broader SERA Orchestrator architecture.
+This is currently operating as a prototype standalone module. The functionality described herein is actively being refactored to serve as the dedicated **Email Gateway and Delegation Assistant** within the broader SERA Orchestrator architecture.
 
 ## 2. Features
 
 * **Email Monitoring:** Continuously polls a specified Exchange Online mailbox for new unread emails.
 * **Intelligent Processing:** Determines which emails to process based on direct addressing or a specific mention trigger ("@SERA AI") in group emails.
-* **LLM-Powered Responses:** Utilizes a Large Language Model (specifically configured for `gemma3:27b` via Ollama) to understand email content and generate relevant, helpful replies.
+* **LLM-Powered Responses:** Utilizes a Large Language Model to understand email content and generate relevant, helpful replies.
 * **Contextual Replies:**
     * Handles general queries based on email content.
     * Provides a self-introduction if specifically asked (e.g., "who are you?", "introduce yourself").
@@ -273,65 +273,78 @@ It's important to understand what this EmailTool module, in its current form, **
     * Check logs for critical unhandled exceptions.
     * Resource issues (memory, CPU) on the machine running the tool.
 
-## 5. Future Implementation with the SERA Orchestrator
+---
 
-This module is a proof-of-concept for email interaction. To integrate it into the wider SERA ecosystem, the following steps are needed:
+## 5. Architectural Evolution: The "Email Gateway" Pattern
 
-### 5.1. Refactor from Polling Service to External Tool
+The original design envisioned the SERA Orchestrator polling the email account directly, relying on a stateless, monolithic script architecture. To align with the SERA Ecosystem microservice standards (as implemented in CAP, CAA, and the core Orchestrator), EMA is being refactored into an independent **Email Gateway and Delegation Assistant**.
 
-The current architecture relies on a continuous polling loop within `main_email_tool.py`. To be integrated with SERA, this module must be refactored into a stateless gRPC service. The SERA Orchestrator, not the EmailTool itself, will be responsible for monitoring the email account and deciding when to process a message.
+EMA will act as the dedicated "brain" for the email domain. It handles the messy reality of Exchange Online, determines the user's intent, answers simple queries directly, and securely delegates complex, long-running tasks to other specialized ecosystem modules (e.g., CV Analysis Processor, Remote Automation Framework) via gRPC.
 
-### 5.2. Define a gRPC API for Email Actions
+### 5.1. Persistent State & Audit Management (PostgreSQL)
 
-A new `.proto` file is required to define a gRPC service contract. This API will expose methods for actions like:
+To support delegating tasks to external modules that may take minutes or hours to complete (e.g., parsing a batch of CVs), EMA must abandon its legacy `while True` polling loop and file-based JSON caching.
 
-* `ProcessEmail(ProcessEmailRequest)`: A method that accepts the full email content (sender, subject, body, etc.) as a structured message. This allows the Orchestrator to pass a specific email to the tool for processing without the tool needing to poll the mailbox.
-* `SendReply(SendReplyRequest)`: A method for sending a reply, including the original message ID to ensure proper threading. The Orchestrator's LLM would generate the reply text and pass it to this method.
+* **Database Integration:** EMA will implement a PostgreSQL database (`ai_assistant_db`) connection using the SQLAlchemy ORM.
+* **Stateful Tracking:** Incoming emails will be written to an `email_messages` table. If a task is delegated to an external module, the message state is flagged as `AWAITING_MODULE` instead of blocking the main thread.
+* **Thread Awareness:** By natively storing the `conversationId` and parsed history in an `email_threads` table, EMA eliminates the need to perform expensive, rate-limited Graph API calls just to retrieve the context of a previous conversation.
+* **Structured Audit Logging:** A `delegated_tasks_audit` table will maintain a strict paper trail of all outbound delegations. This captures the sender, the matched intent, the exact gRPC payload sent to downstream modules, and the eventual return code/status.
 
-### 5.3. Implement the SERA-side Orchestration Logic
+### 5.2. Asynchronous Processing & Context Abstraction
 
-The SERA Orchestrator will need new modules or logic to:
+The synchronous `time.sleep()` polling loop is a massive bottleneck. EMA will adopt the worker pattern utilized across the ecosystem, paired with strict data encapsulation.
 
-* **Poll the Email Mailbox**: A new, dedicated component within SERA will periodically poll the `sera-ai@gtt.net` mailbox for new messages, acting as the centralized "email listener."
-* **Trigger the EmailTool**: When a new, relevant email is found, the Orchestrator will call the EmailTool gRPC service's `ProcessEmail` method.
-* **Synthesize Replies**: The Orchestrator's core LLM will handle the reply generation, using the email body as part of its context and leveraging its wider range of available tools (e.g., `JiraTool`, `RAGConfluenceRetriever`) to answer complex queries.
-* **Manage Final Actions**: After the Orchestrator's LLM synthesizes a final response, the Orchestrator will call the EmailTool's `SendReply` gRPC method to dispatch the email.
+* **Decoupled Polling:** A lightweight asynchronous poller will fetch Graph API emails and place them into a Redis queue.
+* **Worker Fleet:** Dedicated worker nodes (using Celery or Python asyncio background tasks within a FastAPI shell) will pick up messages from the queue for AI classification and delegation.
+* **Processing Context Abstraction:** Before an email hits the AI or any routing logic, the worker bundles the raw Graph API message, the parsed clean text, the sender identity, and the recipient modes (e.g., `is_sole_recipient`) into a strongly typed `ProcessingContext` data class. This ensures a clean, uniform data handoff throughout the pipeline.
 
-This new architecture will enable the EmailTool to become a powerful, multi-channel connector, transforming emails into actionable requests for the full SERA system.
+### 5.3. Dynamic Intent Registry & "Right-Sized" Models
 
-### 5.4. Proactive Task Classification & Orchestration Directives (Planned)
+EMA will transition away from the legacy, local Ollama integration and connect directly to the AI Factory via a standardized `vLLMClient`. It relies on a database-driven registry to dynamically route requests without requiring hardcoded logic updates.
 
-The Email Assistant will be enhanced to act as an intelligent pre-processor, classifying the intent and criticality of an email before forwarding the request to the Orchestrator. This moves the initial decision-making closer to the source of the data (the email itself), enabling faster and more intelligent responses. This refactoring will be implemented in two parts:
+* **The Intent Registry (PostgreSQL):** A dedicated `ema_intent_registry` table stores active ecosystem routes. Each record contains an `intent_slug` (e.g., `cv_submission`), a natural-language `llm_description`, the `target_module` gRPC endpoint, and an `allowed_groups` list.
+* **Dynamic Intent Classification (`gemma3:4b`):** All incoming emails pass through this high-speed routing model. EMA queries the active registry and dynamically assembles the LLM prompt, instructing the model to classify the email based strictly on the registered descriptions. The model outputs a structured JSON directive (e.g., `{"intent": "cv_submission", "confidence_score": 0.95}`).
+* **Fallback & Ambiguity:** If the model returns a confidence score below a configured threshold (e.g., 0.70) or hallucinates an unregistered intent, EMA defaults to the `general_query` route to prevent routing failures.
+* **Reasoning & Drafting (`gemma3:27b`):** Only when the intent is classified as a `general_query` needing a complex local reply, or when synthesizing a final response from a completed delegated task, will EMA invoke the larger, resource-intensive reasoning model.
 
-1.  **Email-Side Classification:** The Email Assistant will use its own dedicated, lightweight LLM (`gemma3:4b`) to perform a first-pass analysis of incoming email content. The model will classify the email's intent (e.g., `incident_report`, `request_for_information`, `chitchat`) and its criticality (e.g., `high`, `medium`, `low`) into a structured JSON object.
+### 5.4. Security, Eligibility & Graceful Refusals
 
-2.  **Enriched Outbound Request:** The Email Assistant will then call the Orchestrator's inbound gRPC API. The `InstructionRequest` will be updated to include a new, structured `orchestration_directives` field containing the classification JSON. This allows the EMA to provide explicit instructions to the Orchestrator, such as `search_strategy: "ensemble_rag"`, based on its initial analysis of the email's content and context.
+EMA serves as the first line of defense for the ecosystem. It must prevent unauthorized users from triggering downstream automation modules.
+
+* **Dynamic Group Resolution:** For intents that define an `allowed_groups` constraint (e.g., a firewall change request restricted to the Network DL), EMA utilizes the Microsoft Graph API to dynamically resolve and expand Distribution Lists or AD Groups into a list of authorized email addresses. This data is cached temporarily to avoid API rate limits.
+* **Graceful Degradation (Bounce Logic):** If the `gemma3:4b` model successfully classifies an intent, but the sender is *not* in the resolved `allowed_groups`, EMA blocks the delegation. Instead of failing silently or crashing, it immediately synthesizes a polite but firm "unauthorized request" email and sends it back to the user, closing the loop locally without ever waking up the target module.
+
+### 5.5. Shared Vault Integration (Attachments)
+
+Modules like CAP (CV processing) and LDP (Legal Documents) rely entirely on file attachments. 
+
+* **Vault Storage:** EMA will be responsible for securely downloading attachments via the Graph API and saving them directly to the shared persistent volume at `/ai/assets/vault/ema/{thread_id}/`.
+* **Pointer Passing:** When delegating tasks to other modules, EMA will pass the exact absolute file paths (pointers) in the gRPC payload, rather than attempting to stream binary data over the wire.
+
+### 5.6. Bi-Directional gRPC Inter-Service Communication
+
+To function as the ecosystem's communication hub, EMA will operate as both a gRPC Client and Server:
+
+* **Outbound Delegation (Client):** When the `gemma3:4b` model classifies an email belonging to another domain (and it passes security checks), EMA translates the `ProcessingContext` and attachment pointers into a gRPC request and dispatches it to the target module's API.
+* **Inbound Replier (Server):** EMA will expose an inbound gRPC service (e.g., `EmailGatewayService.SendReply`). When a delegated module finishes its long-running task, it calls this endpoint with the final synthesized text. EMA looks up the original `message_id` in Postgres, records the audit trail, and dispatches the final `replyAll` via the Graph API.
 
 ---
 
-## 6. Planned Orchestrator Changes to Support the EmailTool
+## 6. Implementation Plan & TODOs
 
-To fully integrate this module, the SERA Orchestrator must be enhanced to support the advanced capabilities of the new EmailTool service. These changes will be implemented within the Orchestrator's codebase.
+The transition to the Email Gateway pattern will be executed in three phased updates to ensure stability during the refactor.
 
-### 6.1. Inbound gRPC API Enhancements for Tool-Initiated Workflows
+### Phase 1: Infrastructure & State Migration
+- [ ] **Database Setup:** Define SQLAlchemy models (`EmailMessage`, `EmailThread`, `DelegatedTaskAudit`, `EmaIntentRegistry`) and configure the connection to the shared PostgreSQL instance.
+- [ ] **Async Refactoring & Context:** Convert the synchronous polling loop into a Redis-backed queue worker architecture. Implement the `ProcessingContext` data class for clean pipeline data passing.
+- [ ] **Vault Storage:** Implement logic to download and save email attachments directly to the shared `/ai/assets/vault/ema/` directory.
 
-The Orchestrator's inbound `OrchestratorInteractionService` API will be expanded to allow the EmailTool (as a gRPC client) to call the Orchestrator for assistance. This is critical for complex tasks like drafting a reply that requires information from multiple sources.
+### Phase 2: Intent Engine & Security Routing
+- [ ] **vLLM Client Integration:** Replace `langchain_community.chat_models.ChatOllama` with the standard ecosystem `vLLMClient`.
+- [ ] **Dynamic Graph API Auth:** Implement the Microsoft Graph API expansion functions for Distribution Lists and AD Groups, complete with TTL caching.
+- [ ] **Router & Refusal Logic:** Build the internal router that executes the `gemma3:4b` intent classification, validates the sender against the resolved `allowed_groups`, and triggers the localized "Bounce/Refusal" email logic if authorization fails.
 
-* **SuggestedReference Message**: A new protobuf message will be introduced to represent a reference to an external piece of information, such as an email thread ID or a document ID.
-* **InstructionRequest Updates**: The `InstructionRequest` will be modified to include a `rich_context_data` field that can contain `SuggestedReference` objects. This allows the EmailTool to pass along relevant historical emails it found in its own data store for the Orchestrator to consider.
-* **InstructionResponse Updates**: The response will be updated with a new `MessageType.APPROVAL_REQUEST` to enable the Orchestrator to ask for user approval before using a suggested reference in a reply, ensuring user consent for potentially sensitive, cross-thread information.
-
-### 6.2. Orchestrator-Side Context and Authorization
-
-* **Context Building (ContextBuilder)**: The `ContextBuilder` will be updated to handle `rich_context_data` passed from the EmailTool. It will be able to incorporate the content of the current email and any user-approved suggested references into the prompt for its own LLM.
-* **Tool Authorization**: A new tool definition YAML file (`config/tools.d/connector_email.yaml`) will be created within the Orchestrator's configuration. This will formally define the EmailTool as a connector and list its capabilities, ensuring the Orchestrator can properly identify and authorize the tool's gRPC calls.
-
-### 6.3. Data Store Separation and Management
-
-The Orchestrator will not manage the EmailTool's dedicated data. The plan recognizes that the EmailTool will handle its own domain-specific data stores (e.g., a dedicated VDB for email content embeddings) to enable features like semantic search across its historical emails. The Orchestrator will simply receive pre-processed or summarized historical context from the EmailTool via the gRPC API.
-
-### 6.4. Inbound Request Handling Enhancements for Directives
-
-The Orchestrator's core logic will be updated to interpret the new `orchestration_directives` field in incoming gRPC requests.
-
-* **Directive-Based Action Planning:** The Orchestrator's reasoning LLM will be prompted to prioritize and execute tasks based on these directives. For example, if a request has a `criticality: "high"` and `search_strategy: "ensemble_rag"` directive, the Orchestrator will bypass its standard single-query RAG flow and immediately trigger a more robust, multi-query search to increase the probability of a successful retrieval. This ensures a specialized tool's domain-specific knowledge guides the main reasoning engine's workflow, making the entire ecosystem more efficient and resilient.
+### Phase 3: gRPC API & Cross-Module Delegation
+- [ ] **Define Protobufs:** Create the `ema_service.proto` defining the `SendReply` and `SendNewEmail` RPCs for other ecosystem modules to consume.
+- [ ] **Implement Inbound Server:** Stand up the gRPC server within the EMA application to listen for cross-module reply requests and execute the final Graph API `replyAll`.
+- [ ] **Implement Outbound Clients:** Integrate dynamic gRPC stub loading (from `/ai/assets/protos/`) so EMA can construct and dispatch task payloads (with vault paths) to modules like CAP, CAA, or the Orchestrator.

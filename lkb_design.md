@@ -1,32 +1,29 @@
 # Legal Knowledge Base (LKB) - Design Document
 
-**Version:** 0.2.0
-**Date:** 2025-12-01
+**Version:** 0.3.0
+**Date:** 2026-03-23
 **Author:** Martin Kecka, Gemini AI
-**Category:** Suite (I + P + A)
+**Category:** Suite (I + P + R + A)
 **Acronym:** LKB
 
 ---
 
 ## 1. Executive Summary
 
-The **Legal Knowledge Base (LKB)** is a modular AI ecosystem designed to digitize, analyze, and query the company's legal agreements (MSAs, Amendments, SOWs).
+The **Legal Knowledge Base (LKB)** is a modular, AI-native contract intelligence platform designed to completely digitize, analyze, and query the company's legal agreements (MSAs, Amendments, SOWs). Positioned as a next-generation replacement for traditional Contract Lifecycle Management (CLM) systems like Ironclad, the LKB provides deep, semantic interrogation of unstructured historical data alongside structured metadata management.
 
-Unlike the Confluence Ingestor which handles structured web content, the LKB must process a mix of file formats—primarily complex PDFs (digital and scanned), but also Word documents (`.docx`) and Excel files used for non-standard Service Order Forms (SOFs).
-
-To align with the "Project CMDMeta" goals (automating the extraction of ~140 metadata properties) and ensure scalability for thousands of historical documents, the solution is decoupled into three independent applications:
+To align with "Project CMDMeta" goals (automating the extraction of ~140 metadata properties) and ensure scalability for thousands of complex documents, the solution is decoupled into four independent applications:
 
 1.  **Legal Document Parser (LDP - Processor):** A heavy-duty, asynchronous conversion engine that transforms raw files (PDF, Image, DOCX, XLSX) into standardized Markdown using a queue-based worker architecture.
-2.  **Legal Knowledge Ingestor (LKI - Ingestor):** A semantic engine that processes Markdown into Vector Embeddings and extracts the "Static Answers" (Metadata) for the 140 required fields.
-3.  **Legal Knowledge Assistant (LKA - Assistant):** A user-facing application for querying contracts, verifying the AI-extracted metadata, and handling "Human-in-the-Loop" corrections.
+2.  **Legal Knowledge Ingestor (LKI - Ingestor):** A semantic engine that processes Markdown into Vector Embeddings and executes batch LLM prompts to extract the "Static Answers" (Metadata) for the 140 required fields.
+3.  **Legal Contract Retriever (LCR - Retriever):** A hybrid search engine exposed via gRPC that seamlessly routes queries to PostgreSQL (for exact metadata matching) or ChromaDB (for semantic clause retrieval).
+4.  **Legal Knowledge Assistant (LKA - Assistant):** A user-facing web application (Split-Screen Dashboard) for browsing contracts, querying the database, verifying AI-extracted metadata, and handling "Human-in-the-Loop" (HITL) corrections and dynamic field generation.
 
 ---
 
 ## 2. Architecture & Reuse Strategy
 
-This suite leverages the "Best of Breed" logic from existing SERA applications to minimize new code.
-
-
+This suite leverages the "Best of Breed" logic from existing SERA applications to minimize new code while establishing a highly specialized legal domain boundary.
 
 ### 2.1 Component Reuse Matrix
 
@@ -36,10 +33,10 @@ This suite leverages the "Best of Breed" logic from existing SERA applications t
 | **RMI (Remittance)** | **The Extraction Gauntlet** (`core/pipeline/a1_extraction`) | **Core of LDP.** Reuse the logic of trying sequential parsers (Layout -> OCR -> Native Text) until one succeeds. Added logic for `.docx` and `.xlsx` parsing. |
 | **CFI (Confluence)** | **HyDE Generator** (`core/qa_generator.py`) | **Core of LKI.** Critical for legal RAG. Generates questions like *"What are the termination conditions?"* to match clauses about *"Material Breach"*. |
 | **CFI (Confluence)** | **Map-Reduce Summarizer** (`core/llm_summarizer.py`) | **Core of LKI.** MSAs are token-heavy. We reuse the `_map_and_assemble_sections` logic for summaries. |
-| **CFI (Confluence)** | **Semantic Analyzer** (`core/llm_analyzer.py`) | **Core of LKI.** Refactored into `MetadataExtractor`. Instead of "User Intent", it iterates through the **140 CMD Metadata fields** to extract specific answers. |
-| **CFI (Confluence)** | **Knowledge Graph** (`core/knowledge_graph_extractor.py`) | **Core of LKI.** Maps relationships (e.g., `GTT` -> `Indemnifies` -> `Client`). |
+| **CFI (Confluence)** | **Semantic Analyzer** (`core/llm_analyzer.py`) | **Core of LKI.** Refactored into `MetadataExtractor`. Iterates through the **140 CMD Metadata fields** during ingestion to extract specific answers to PostgreSQL. |
+| **CFR (Confluence Retriever)** | **Intent Routing & Reranking** | **Core of LCR.** Adapted for legal Hybrid Search (SQL vs. Vector) and NVIDIA NIM reranking. |
 | **CAP (CV Processor)** | **UI / UX Pattern** | **Core of LKA.** Reuse the Dashboard layout, Split-Screen (Document vs. Data), and "Confidence Badge" logic for metadata verification. |
-| **Shared Lib** | `LLMInterface`, `Embedder`, `VdbWriter` | Moved to `ai/common_lib` and imported by all three. |
+| **Shared Lib** | `LLMInterface`, `Embedder`, `VdbWriter` | Moved to `ai/common_lib` and imported by all components. |
 
 ---
 
@@ -93,64 +90,85 @@ This is a **Dual-Mode** application (Incremental Sync & Standalone Task). It pic
 
 1.  **`FetchProcessedDocStep`**: Loads the Markdown from the LDP output directory.
 2.  **`SemanticChunkingStep`**:
-    * *Reuse:* `text_chunker.py` (CFI).
     * *Logic:* Splits by Markdown Headers (`#`, `##`, `###`) which represent legal clauses (e.g., "1.1 Confidentiality").
 3.  **`MetadataExtractionStep` (The "140 Fields" Logic)**:
-    * *Reuse:* `llm_analyzer.py` (CFI).
-    * *Input:* Loads the 140 metadata definitions (Yes/No, Dates, Entities) from the Database.
-    * *Process:* For every required field (e.g., "Effective Date", "Change of Control Clause?"), it prompts the LLM with relevant text chunks.
-    * *Output:* Structured JSON stored in the `contract_metadata` table.
+    * *Input:* Loads the 140 metadata definitions (Yes/No, Dates, Entities, Clause Checks) from the Database.
+    * *Process:* Utilizing the massive local H100 compute cluster, it brute-forces prompt batches across the chunks to pre-compute the answers for all 140 fields.
+    * *Output:* Structured JSON stored in the `contract_metadata` PostgreSQL table.
 4.  **`AdvancedEnrichmentStep`**:
-    * **HyDE:** Runs `qa_generator.py` (CFI) to create hypothetical questions for complex clauses.
-    * **Graph:** Runs `knowledge_graph_extractor.py` (CFI) to map entity relationships.
+    * **HyDE:** Creates hypothetical questions for complex clauses to aid vector retrieval.
+    * **Graph:** Maps entity relationships.
 5.  **`EmbedAndStoreStep`**:
-    * *Reuse:* `embedder.py` (CFI).
-    * Stores vectors in ChromaDB `legal_contracts` collection.
+    * Stores vectors in the ChromaDB `legal_contracts` collection.
 
 ---
 
-## 5. Application 3: Legal Knowledge Assistant (LKA)
+## 5. Application 3: Legal Contract Retriever (LCR)
+
+**Category:** (R) Retriever
+**Role:** The "Hybrid Search Engine"
+**Input:** Orchestrator Search Query (gRPC)
+**Output:** Structured JSON containing SQL metadata and/or Vector citations.
+
+The LCR is a dedicated gRPC service that acts as the bridge between the broader Orchestrator ecosystem and the Legal Knowledge Base. Because contract queries can be strictly factual ("What is the term?") or highly interpretive ("Summarize the liability limits"), the LCR uses a hybrid retrieval strategy.
+
+### 5.1 Query Intent Routing
+When passed a user query, a fast, small LLM (e.g., `gemma3:8b`) performs Intent Classification to route the search:
+
+1.  **Metadata/SQL Intent:** If the query maps to one of the 140 pre-extracted fields (e.g., "Show me all contracts with Auto-Renew"), the LCR translates the query into a PostgreSQL `SELECT` statement against the `contract_metadata` table.
+2.  **Semantic/Vector Intent:** If the query is open-ended or analytical (e.g., "How does the indemnification clause handle data breaches?"), the LCR converts the query to an embedding and searches ChromaDB.
+3.  **Hybrid Intent:** If the query requires both (e.g., "Summarize the SLA penalties for contracts expiring in 2026"), the LCR filters by date in SQL, then performs a vector search only on the chunks belonging to that filtered subset of documents.
+
+### 5.2 Context Formatting & Output
+To prevent hallucinations in downstream synthesis, the LCR returns a strictly formatted payload:
+* **SQL Hits:** Returned as clean key-value pairs representing the extracted fields.
+* **Vector Hits:** Returned with the exact `clause_text`, the `document_name`, and a `citation_link` (e.g., `#page=4&chunk_id=102`) so the LKA UI can automatically scroll the user to the source material.
+* **Reranking:** Vector results are passed through an NVIDIA NIM reranker to ensure only the highest-confidence clauses are returned.
+
+---
+
+## 6. Application 4: Legal Knowledge Assistant (LKA)
 
 **Category:** (A) Assistant
-**Role:** The "Interface"
+**Role:** The "Interface" (Ironclad Replacement)
 **Input:** User Query / UI Interaction
-**Output:** RAG Response + Metadata Dashboard
+**Output:** RAG Response + Split-Screen Metadata Dashboard
 
-### 5.1 Architecture
-Built as a React SPA + FastAPI backend, mirroring the **CAP** architecture.
+### 6.1 Architecture
+Built as a modern React SPA + FastAPI backend. It serves as the primary interactive portal for Legal, Deal Desk, and Finance teams.
 
-### 5.2 The "Hybrid Search" Engine
-This handles the requirement to query specific metadata vs. general concepts.
-
-* **Scenario A: "Metadata Query"**
-    * *User:* "Which contracts have a Change of Control clause?"
-    * *Logic:* The Agent queries the SQL `contract_metadata` table directly.
-    * *Result:* Returns a precise list of contracts. 100% accurate, no hallucination.
-* **Scenario B: "Conceptual Query"**
-    * *User:* "Summarize the indemnification obligations for GTT in the Insulet MSA."
-    * *Logic:* Triggers the **Advanced RAG Pipeline** (using HyDE and Reranking) to find relevant clauses and synthesize an answer.
-
-### 5.3 UI Features (The CAP Influence)
-* **Split View:** Left side shows the Original Document (scrolled to the relevant clause). Right side shows the Chat/Metadata panel.
-* **Validation Interface:** Users (e.g., Sales Admin/Legal) can view the AI-extracted "140 Fields".
-    * *Confidence High:* Displayed in Green.
-    * *Confidence Low:* Displayed in Red (needs review).
-    * *Correction:* Users can edit the value. This "Human-in-the-Loop" feedback updates the DB and helps fine-tune the system.
+### 6.2 UI Features
+* **Split View:** The left pane renders the original Document (Markdown or PDF viewer). The right pane displays the Chat interface and the 140-field Metadata panel.
+* **Validation Interface (HITL):** Users can view the AI-extracted fields.
+    * *Confidence High:* Displayed normally.
+    * *Confidence Low:* Displayed with a warning badge (needs review).
+    * *Correction:* Users can click to edit the value. This "Human-in-the-Loop" feedback immediately updates the PostgreSQL database and flags the field as "Human Verified."
+* **Citation Auto-Scroll:** Clicking an extracted field or an AI chat citation automatically navigates the left pane to the exact clause in the document.
 
 ---
 
-## 6. Implementation Plan: Phase 1 (The Parser)
+## 7. Implementation Plan & Roadmap
 
-Our immediate focus is the **Legal Document Parser (LDP)**.
+Given that the core Parser (LDP) is largely complete, the remaining build is prioritized to deliver immediate, interactive value to the business.
 
-### 6.1 Requirements
-* **Stack:** Python, PyMuPDF (fitz), Marker (surya-ocr), LayoutParser, python-docx, pandas (for Excel), **Celery, Redis**.
-* **Dependencies:** `torch`, `transformers` (for Marker).
-* **Output:** Strict Markdown.
+### Phase 1: The "Read-Only" Dashboard (LKA - UI/Backend)
+* Build the core Split-Screen React UI and FastAPI backend.
+* Implement the backend endpoints to fetch the parsed Markdown and the 140 pre-extracted fields directly from PostgreSQL.
+* **Goal:** Allow users to browse their contract repository and immediately see the AI's metadata extractions.
 
-### 6.2 Task List
-1.  **Scaffold Repository:** Create `ai/legal_document_parser`.
-2.  **Infrastructure Setup:** Configure the Redis container and Celery worker entrypoint in `docker-compose`.
-3.  **Ingest Test Files:** Create a test suite including Clean/Dirty PDFs and Non-standard SOFs.
-4.  **Benchmark:** Run `marker` (local) vs. `nanonets` (API) on the test set.
-5.  **Develop `layout_to_markdown.py`**: A robust script to convert the layout analysis into Markdown that preserves legal numbering (1.1, 1.1.a) and table structures.
+### Phase 2: Human-in-the-Loop (HITL) Integration
+* Add edit capabilities to the 140 fields in the UI.
+* Build the `PUT` endpoints in FastAPI to save corrections back to the database.
+* Implement audit logging (tracking who changed what field and when).
+* **Goal:** Establish trust by allowing legal professionals to verify and correct the AI's work.
+
+### Phase 3: The Hybrid Retriever (LCR)
+* Build the `gRPC` service that handles open-ended chat queries.
+* Implement the SQL/Vector intent routing logic.
+* Connect the LCR to the LKA chat interface.
+* **Goal:** Enable complex, conversational Q&A against the contract repository with precise citations.
+
+### Phase 4: Dynamic Field Generation
+* Add a UI feature allowing authorized users to define a "141st custom field" (e.g., "Does this contract mention the new 2026 tax regulation?").
+* Build the backend logic to spin up a Celery task that retroactively runs the new extraction prompt against the entire database of processed markdown chunks.
+* **Goal:** Future-proof the platform by making the extraction engine entirely self-service for the business.
