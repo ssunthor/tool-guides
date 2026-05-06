@@ -221,27 +221,49 @@ The application's behavior is controlled by `config/settings.yaml`.
 
 ## 8. Future Enhancements
 
-The RMI is currently robust but resource-intensive. The next major architectural evolution will shift from a "linear gauntlet" model to an "intelligent router" model.
+The RMI is currently transitioning from a synchronous, multi-model fallback gauntlet to a unified, vision-first architecture powered by Nanonets and Gemma 4. 
 
-### 8.1. Phase 2 Architecture: The "Intelligent Router" (Refactor)
-**Objective:** Move away from running every extraction workflow on every document. instead, classify the document first and route it to the most efficient, specialized pipeline track.
+### 8.1. The "Clean Slate" Refactor (Total Purge)
+**Objective:** Execute a complete teardown of the legacy extraction codebase. All legacy OCR engines (Marker, Tesseract, Surya, PyMuPDF) and their associated complex downstream math-repair loops (1st/2nd pass logic) will be deleted. The new pipeline will be built from scratch to leverage reasoning models (Gemma 4) over clean data representations.
+
+### 8.2. Phase 2 Architecture: The "Intelligent Router" 
+**Objective:** Move away from running sequential fallback extractors. Instead, classify the payload immediately and route it to the most efficient, specialized pipeline track.
 
 **Core Components:**
 1.  **The Traffic Controller (Step 1):**
-    * **Input:** Metadata (Sender, Subject) + Email Body + Document Thumbnail.
-    * **Logic:** Checks a new `sender_profiles` database table.
-    * **Action:** Determines the `processing_strategy` before any heavy extraction begins.
+    *   **Input:** Metadata (Sender, Subject, Attachment types) + Email Body.
+    *   **Logic:** Checks the `sender_profiles` database table and evaluates the payload presence.
+    *   **Action:** Determines the exact `processing_strategy` before any heavy extraction begins.
 
-2.  **specialized Pipeline Tracks:**
-    * **Track A (The "Noise" Track):** Immediate classification for Auto-responses, Out-of-Office, and Secure Portal notifications. *Cost: Near Zero.*
-    * **Track B (The "Standard" Track):** For known clean formats. Runs fast extractors (`Excel` or `OCR`) + LLM Extraction. Skips expensive vision repairs.
-    * **Track C (The "Heavy" Track):** For unknown senders or complex layouts. Runs the full current suite (`Marker`, `Nanonets`) + Vision Repair loops.
-    * **Track D (The "Custom" Track):** For specific "messy" invoices that consistently fail standard methods. Executes hard-coded, customer-specific parsing logic based on the sender profile.
+2.  **Specialized Pipeline Tracks:**
+    *   **Track A (The "Noise" Track):** Immediate classification for Auto-responses, Out-of-Office, and Secure Portal notifications. *Cost: Near Zero.*
+    *   **Track B (The "Body-Only" Track):** For emails with no valid attachments where the remittance data is in the email body or thread. Bypasses Nanonets completely; passes the raw email string directly to Gemma 4.
+    *   **Track C (The "Native" Track):** For `.xlsx` or `.csv` files. Uses native Pandas extraction, directly formatted for Gemma 4.
+    *   **Track D (The "Standard Vision" Track):** The default route for standard PDFs/Images. Uses the 3x H100 Nanonets cluster to generate clean HTML tables, followed by a single-pass extraction using Gemma 4 (with `enable_thinking=True` to organically reason through Debit/Credit logic).
+    *   **Track E (The "Custom/Garbage" Track):** For notoriously messy senders identified by their profile. Executes hard-coded, customer-specific Gemma 4 prompts or bypasses standard validation rules to handle their specific brand of chaos.
 
-### 8.2. Database & Learning Enhancements
-* **Sender Profile Database:** A new table to store learned preferences for each sender (e.g., `preferred_workflow='track_b'`, `invoice_regex='INV-\d{8}'`).
-* **The "Learning" Feedback Loop:** When an operator manually corrects a record in the dashboard, the system should capture *why* it failed (e.g., "This is a scanned image," "This is a custom Excel format"). This feedback updates the `sender_profile`, ensuring the *next* email from that customer is routed correctly automatically.
+### 8.3. Database & Learning Enhancements (Sender Profiles)
+*   **Sender Profile Database:** A new table to store learned preferences and routing rules for specific senders (e.g., `preferred_track='Track E'`, `custom_prompt_id='XYZ'`, `invoice_regex='INV-\d{8}'`). This allows easy "adjusting" of logic for customers who send total garbage.
+*   **The "Learning" Feedback Loop:** When an operator manually corrects a record in the Cash Application Assistant (CAA) dashboard, the system captures *why* it failed. This feedback updates the `sender_profile`, ensuring the next email from that customer is routed to the correct custom track automatically.
 
-### 8.3. Other Planned Improvements
-* **CAA Integration:** Develop a mechanism for the RMI to receive corrected data validation signals from the Cash Application Assistant to further refine sender profiles.
-* **Context-Aware Currency Disambiguation:** Enhance `normalize_currency` to use customer country data for smarter default currency selection (e.g., default to `CAD` for Canadian vendors instead of `USD`).
+### 8.4. Advanced Error Handling: Holistic Table Repair (Double-Rip)
+**Objective:** Eliminate math errors caused by bad OCR formatting rather than asking the LLM to "fix the math" downstream.
+
+*   **Mechanism:** Adopt the `table_repair.py` logic from the Legal Document Parser (LDP). Before data extraction begins, the system scans the Nanonets HTML output for unclosed table tags (`<tr>`, `<td>`) that bleed across physical page boundaries.
+*   **The Double-Rip:** If a broken table spans a page break, RMI will crop the bottom 50% of Page A and the top 50% of Page B, passing the high-res images to Gemma 4 to perfectly reconstruct the missing rows.
+
+### 8.5. Confidence Scoring: Logprobs over Hallucinations
+**Objective:** Replace subjective LLM confidence guessing with mathematical certainty.
+
+*   **Mechanism:** When Gemma 4 extracts foundational data (e.g., `customer_name`, `total_payment_amount`), the system will capture the exact token log-probabilities. 
+*   **Action:** If the mathematical confidence score of an extracted field falls below a strict threshold (e.g., 85%), the system instantly flags the record for manual review in the CAA, rather than blindly trusting the LLM.
+
+### 8.6. CMD Connector Integration (Guided Validation)
+**Objective:** Leverage the central Cash Management Database (CMD) to perform validations of extracted invoice candidates during the RMI extraction phase, improving the context given to the AI repair models.
+
+*   **Mechanism:** RMI will use CMD strictly to *guide* the AI repair loop.
+*   **Process Flow:**
+    1. During validation, query CMD via gRPC (`validate_invoices`) for all extracted invoice candidates.
+    2. If an invoice is *not* found in CMD, the system sets a `trigger_invoice_repair` flag.
+    3. The model is prompted with the context that the previously extracted number is invalid in the financial system, forcing it to scrutinize the document specifically for OCR errors on that string.
+    4. **Crucially:** If the model insists the number on the page matches the "invalid" extraction, RMI must pass it through unchanged. RMI acts as an objective reader; it must present what the customer actually submitted (even if it's a typo) to the downstream CAA operators for manual investigation.

@@ -45,35 +45,30 @@ This suite leverages the "Best of Breed" logic from existing SERA applications t
 **Category:** (P) Processor
 **Role:** The "Grinder"
 **Input:** Raw Files (PDF, Images, DOCX, XLSX)
-**Output:** Clean Markdown (`content.md`) + Layout JSON + Extracted Images
+**Output:** Clean Markdown (`content_nanonets.md`), JSON Stats, and Repaired Tables
 
-### 3.1 Asynchronous Architecture (Redis/Celery)
-Processing a single scanned MSA can take minutes. To handle the requirement of "thousands of PDFs," LDP uses the **CAP** worker pattern.
+### 3.1 Asynchronous Map-Reduce Architecture
+Processing a single scanned MSA can take minutes. To handle the requirement of "thousands of PDFs," the LDP uses a highly parallelized **Celery and Redis-backed Map-Reduce (Chords)** architecture.
 
-* **API Service (FastAPI):** Accepts file uploads, validates format, saves to shared storage, and pushes a `process_document_task` to Redis. Returns a `job_id` immediately.
-* **Redis:** Message Broker.
-* **Worker Cluster (Celery):** Scalable workers pick up tasks. They run the heavy "Gauntlet" logic.
-* **Result Backend:** Updates the job status in Postgres (`processing`, `completed`, `failed`).
+* **API Service / Orchestrator:** Accepts file uploads, saves to shared storage, and pushes a master job to Postgres (`pending`).
+* **Dispatcher (Celery Beat):** Polls for pending jobs and dispatches them based on cluster capacity to prevent GPU starvation.
+* **Scatter (Page-Level OCR):** The master task rips the PDF into high-res images and dispatches a concurrent sub-task for *every single page*.
+* **Gather (Stitching & Repair):** A callback chord stitches the processed pages back together and initiates the holistic repair sequence.
 
-### 3.2 Core Logic: The "Gauntlet" (Expanded from RMI)
-Legal documents vary wildly. The workers execute an expanded "Gauntlet" pipeline:
+### 3.2 Core Logic: The Vision-First Pipeline
+We have transitioned from legacy layout models to a purely vision-driven pipeline to handle the extreme variance in legal scans.
 
-1.  **Stage 1: File Type Routing**
-    * **Office Files (.docx, .xlsx):** Route to native parsers (`python-docx`, `pandas`) to convert directly to Markdown/Tables.
-    * **PDF/Images:** Proceed to Layout Analysis.
-2.  **Stage 2: Digital Layout Analysis (`pymupdf` / `surya`)**
-    * Checks if the PDF has a clean, selectable text layer.
-    * Extracts text while preserving visual hierarchy (headers vs. body) using bounding box analysis.
-3.  **Stage 3: Intelligent OCR (`marker` / `tesseract`)**
-    * If Stage 2 fails (scanned image), attempts local OCR optimized for document layout (detecting columns).
-4.  **Stage 4: Vision Fallback (`nanonets` / `gemma3:27b`)**
-    * For extremely noisy scans or handwritten notes.
-
-### 3.3 Deliverable
-The LDP outputs a folder per document containing:
-* **`content.md`**: The contract text in strict Markdown. Headers (`# 1. Definitions`) are preserved.
-* **`images/`**: Extracted figures/tables.
-* **`metadata.json`**: Technical metadata (page count, OCR confidence score, parser used).
+1.  **Stage 1: Concurrent Vision OCR (`nanonets`)**
+    * Every page is sent concurrently to the Nanonets OCR2-3B endpoint, which reads the page naturally, capturing text and converting tables to HTML `<tr>`/`<td>` tags.
+2.  **Stage 2: Holistic Table Repair (The "Double-Rip" Strategy)**
+    * The system scans the stitched Markdown for broken HTML tags spanning page boundaries.
+    * If a broken table is detected, it crops the bottom 50% of the originating page and the top 50% of the subsequent page.
+    * It prompts **Gemma 4 (31B)** to reconstruct just the missing `<tr>` rows, seamlessly stitching them back into the document (with a Nanonets fallback if Gemma times out).
+3.  **Stage 3: Intelligent Metadata Extraction (`gemma-3-27b-it`)**
+    * **The Sandwich Method:** For documents exceeding 50k characters, the middle is gutted, leaving the top 75% and bottom 25% to fit perfectly within context windows.
+    * **Logprob Confidence Scoring:** Extracts the base metadata (Category, Date, Customer) and calculates the exact token log-probabilities to generate a mathematical confidence score, rather than relying on LLM self-evaluations.
+4.  **Stage 4: Entity Resolution (`cmc_client`)**
+    * The extracted customer name/email is fired against the master CMD registry via gRPC to resolve the official Client ID and Group ID.
 
 ---
 
@@ -89,15 +84,19 @@ This is a **Dual-Mode** application (Incremental Sync & Standalone Task). It pic
 ### 4.1 Workflow Steps
 
 1.  **`FetchProcessedDocStep`**: Loads the Markdown from the LDP output directory.
-2.  **`SemanticChunkingStep`**:
-    * *Logic:* Splits by Markdown Headers (`#`, `##`, `###`) which represent legal clauses (e.g., "1.1 Confidentiality").
+2.  **`SemanticChunkingStep` (Hybrid LLM + Deterministic Strategy)**:
+    * *Logic:* Instead of relying on fragile Markdown headers, the LKI assigns line numbers to the text and feeds it to an LLM (Gemma 4) using sliding overlapping windows. The LLM extracts semantic pointers (start/end lines, chunk types, TOC numbers). A deterministic Python structural merger then deduplicates the overlaps, stitches broken boundaries, and isolates tables.
 3.  **`MetadataExtractionStep` (The "140 Fields" Logic)**:
     * *Input:* Loads the 140 metadata definitions (Yes/No, Dates, Entities, Clause Checks) from the Database.
     * *Process:* Utilizing the massive local H100 compute cluster, it brute-forces prompt batches across the chunks to pre-compute the answers for all 140 fields.
     * *Output:* Structured JSON stored in the `contract_metadata` PostgreSQL table.
 4.  **`AdvancedEnrichmentStep`**:
-    * **HyDE:** Creates hypothetical questions for complex clauses to aid vector retrieval.
-    * **Graph:** Maps entity relationships.
+    * **Multi-Phase Summarization:** Generates standard brief/detailed summaries for chunks. For documents exceeding 30k characters, it triggers a robust 4-phase Map-Reduce pipeline (Rank -> Extract -> Synthesize -> Critique).
+    * **Intent-Based Summaries:** Pre-computes specialized page summaries based on user personas (e.g., Executive Summary, Technical Deep Dive, Troubleshooting Guide).
+    * **Table Summarization:** Converts complex HTML pricing tables and SLAs into natural language paragraphs so the Vector DB can accurately retrieve structured data.
+    * **HyDE (Hypothetical Document Embeddings):** Generates synthetic user questions for specific legal clauses to bridge the semantic gap during retrieval.
+    * **Vision Analysis:** Uses vision models to extract keywords and descriptions from embedded document images.
+    * **Knowledge Graph Extraction:** Maps entity relationships via triplets (Subject -> Predicate -> Object).
 5.  **`EmbedAndStoreStep`**:
     * Stores vectors in the ChromaDB `legal_contracts` collection.
 
@@ -127,48 +126,92 @@ To prevent hallucinations in downstream synthesis, the LCR returns a strictly fo
 
 ---
 
-## 6. Application 4: Legal Knowledge Assistant (LKA)
+## 6. Application 4: Legal Document Assistant (LDA)
 
 **Category:** (A) Assistant
 **Role:** The "Interface" (Ironclad Replacement)
 **Input:** User Query / UI Interaction
-**Output:** RAG Response + Split-Screen Metadata Dashboard
+**Output:** Split-Screen Metadata Dashboard + Cluster Remote Control
 
 ### 6.1 Architecture
-Built as a modern React SPA + FastAPI backend. It serves as the primary interactive portal for Legal, Deal Desk, and Finance teams.
+Built as a modern React Single Page Application (SPA) using Feature-Sliced Design (FSD), served by a FastAPI backend. It serves as the primary interactive portal for Legal, Deal Desk, and Finance teams.
 
-### 6.2 UI Features
-* **Split View:** The left pane renders the original Document (Markdown or PDF viewer). The right pane displays the Chat interface and the 140-field Metadata panel.
-* **Validation Interface (HITL):** Users can view the AI-extracted fields.
-    * *Confidence High:* Displayed normally.
-    * *Confidence Low:* Displayed with a warning badge (needs review).
-    * *Correction:* Users can click to edit the value. This "Human-in-the-Loop" feedback immediately updates the PostgreSQL database and flags the field as "Human Verified."
-* **Citation Auto-Scroll:** Clicking an extracted field or an AI chat citation automatically navigates the left pane to the exact clause in the document.
-
+### 6.2 Core UI Features
+* **Split View:** The left pane renders the original Document (PDF stream) or the AI-generated Markdown (with native HTML table rendering). The right pane displays the extracted metadata.
+* **Validation Interface (HITL):** Users review the AI-extracted fields and logprob confidence scores. Editing a field automatically triggers a background save (`onBlur`) to PostgreSQL. 
+* **CMD Resolution Autocomplete:** Unassigned documents can be quickly mapped to the correct corporate hierarchy using a hybrid caching/remote gRPC autocomplete component linked to the CMD Registry.
+* **Active Cluster Remote Control:** The LDA is not just a passive reader. Using a dedicated gRPC connector (`ldp_connector`), users can click "Reprocess" or "Cancel" in the UI to instantly dispatch commands to the backend LDP worker nodes.
+* **Smart Polling:** Utilizing React Query, the Document Explorer automatically polls the database every 2 seconds *only* when active processing jobs are detected, providing real-time pipeline status updates without refreshing.
 ---
 
 ## 7. Implementation Plan & Roadmap
 
-Given that the core Parser (LDP) is largely complete, the remaining build is prioritized to deliver immediate, interactive value to the business.
+Given that the core Parser (LDP) is largely complete and the Assistant (LDA) UI is functional, the remaining build is prioritized to deliver deep semantic search and self-service capabilities to the business.
 
-### Phase 1: The "Read-Only" Dashboard (LKA - UI/Backend)
-* Build the core Split-Screen React UI and FastAPI backend.
-* Implement the backend endpoints to fetch the parsed Markdown and the 140 pre-extracted fields directly from PostgreSQL.
-* **Goal:** Allow users to browse their contract repository and immediately see the AI's metadata extractions.
+### Phase 1: The "Read-Only" Dashboard (LDA) - [COMPLETE]
+* **Objective:** Allow users to browse their contract repository and immediately see the AI's metadata extractions alongside the original document.
+* **Deliverables:** * Built the core Split-Screen React UI and FastAPI backend.
+  * Implemented the backend endpoints to fetch the parsed Markdown and the **foundational metadata** (Category, Customer, Date, Contacts) extracted by the LDP directly from PostgreSQL.
 
-### Phase 2: Human-in-the-Loop (HITL) Integration
-* Add edit capabilities to the 140 fields in the UI.
-* Build the `PUT` endpoints in FastAPI to save corrections back to the database.
-* Implement audit logging (tracking who changed what field and when).
-* **Goal:** Establish trust by allowing legal professionals to verify and correct the AI's work.
+### Phase 2: Human-in-the-Loop (HITL) Integration - [COMPLETE]
+* **Objective:** Establish trust by allowing legal professionals to verify, correct, and control the AI's work.
+* **Deliverables:**
+  * Added edit capabilities to the extracted fields in the UI with background auto-saving (`onBlur`).
+  * Built the active gRPC remote control allowing users to trigger `Reprocess` or `Cancel` commands directly to the LDP cluster.
+  * Implemented the hybrid CMD Autocomplete to seamlessly map unassigned documents to the official corporate hierarchy.
 
-### Phase 3: The Hybrid Retriever (LCR)
-* Build the `gRPC` service that handles open-ended chat queries.
-* Implement the SQL/Vector intent routing logic.
-* Connect the LCR to the LKA chat interface.
-* **Goal:** Enable complex, conversational Q&A against the contract repository with precise citations.
+### Phase 3: Legal Knowledge Ingestor (LKI) - [IN PROGRESS]
+* **Objective:** Build the semantic engine that bridges the gap between raw text and searchable vector/SQL databases, fulfilling the requirements of Project CMDMeta.
+* **Deliverables:**
+  * **Semantic Chunking:** Develop a robust, fault-tolerant chunking strategy. Because relying on Markdown headers fails across decades of inconsistent legal formatting, the system uses an LLM with sliding windows to extract precise clause pointers, backed by Python logic to sanitize boundaries and stitch tables.
+  * **The "140 Fields" Map-Reduce:** Utilize the local H100 compute cluster to execute prompt batches across the chunks, pre-computing and extracting the "Static Answers" (Metadata) for all 140 required fields into PostgreSQL.
+  * **Advanced Semantic Enrichment:** Implement a massive enrichment pipeline including:
+      * **Map-Reduce Summarization:** A 4-phase pipeline to accurately summarize massive 200-page MSAs.
+      * **Intent Summaries:** Pre-computing Executive and Technical summaries to speed up real-time RAG.
+      * **Table-to-Text:** Converting HTML pricing tables into natural language for vector search.
+      * **HyDE:** Generating synthetic questions for complex clauses.
+  * **Vector Generation:** Generate embeddings for the chunks, summaries, and questions, storing them in the ChromaDB `legal_contracts` collections.
 
-### Phase 4: Dynamic Field Generation
-* Add a UI feature allowing authorized users to define a "141st custom field" (e.g., "Does this contract mention the new 2026 tax regulation?").
-* Build the backend logic to spin up a Celery task that retroactively runs the new extraction prompt against the entire database of processed markdown chunks.
-* **Goal:** Future-proof the platform by making the extraction engine entirely self-service for the business.
+### Phase 4: The Hybrid Retriever (LCR) - [PLANNED]
+* **Objective:** Enable complex, conversational Q&A against the contract repository with precise, clickable citations.
+* **Deliverables:**
+  * Build the `gRPC` service that handles open-ended chat queries from the LDA UI.
+  * Implement an **Intent Routing** layer (using a fast, small LLM) to dynamically route user queries to either PostgreSQL (for exact metadata hits across the 140 fields) or ChromaDB (for semantic clause matching).
+  * Integrate NVIDIA NIM reranking to ensure only the highest-confidence clauses are returned to the user.
+  * Connect the citations to the LDA UI to enable the "Auto-Scroll" feature, taking the user directly to the source text in the split-screen view.
+
+### Phase 5: Dynamic Field Generation (Self-Service) - [PLANNED]
+* **Objective:** Future-proof the platform by making the extraction engine entirely self-service for the business, allowing them to adapt to new legal requirements instantly.
+* **Deliverables:**
+  * Add a UI feature in the LDA allowing authorized Deal Desk/Legal users to define a "141st custom field" (e.g., *"Does this contract mention the new 2026 tax regulation?"*).
+  * Build the backend logic to insert this new prompt into the database.
+  * Develop an asynchronous Celery task that retroactively runs the new extraction prompt against the entire database of previously processed markdown chunks, automatically populating the new column across all historical contracts without requiring a full re-parse.
+
+### Phase 6: The Collaborative Workflow Engine (CLM State Machine) - [PLANNED]
+* **Objective:** Evolve the Legal Document Assistant (LDA) from a post-execution validator into a full-lifecycle Contract Lifecycle Management (CLM) system, replacing legacy platforms like Ironclad.
+* **Deliverables:**
+  * **Lifecycle State Machine:** Expand the PostgreSQL schema to track active negotiation states (e.g., `drafting`, `internal_legal_review`, `pending_counterparty`, `out_for_signature`, `executed`).
+  * **Email-Driven Ingestion:** Adapt the Remittance Mail Ingestor (RMI) pattern to monitor a dedicated negotiations inbox (e.g., `negotiation@gtt.net`). The system will ingest incoming emails, associate them with active contract records, and seamlessly launch or update negotiations directly from Outlook.
+  * **Approval Routing & Collaboration:** Build conditional workflow logic for internal approvals across departments, including UI capabilities for commenting, messaging, and assigning tasks.
+
+### Phase 7: Automated Drafting & Redline Management - [PLANNED]
+* **Objective:** Handle live, multi-party negotiations by safely processing and generating `.docx` files without compromising structural legal formatting.
+* **Deliverables:**
+  * **OpenXML Redline Processor:** Develop a specialized Python service (using `python-docx` or `lxml`) to programmatically diff OpenXML runs and paragraphs. This ensures the system can track changes and generate safe, cleanly formatted redline documents byte-for-byte.
+  * **Semantic Version Diffing:** Integrate the reasoning LLM (e.g., `gemma3:27b`) to analyze the delta between V1 and V2 of a contract, automatically summarizing changes in risk profiles, liability caps, or SLA commitments for the Deal Desk.
+  * **Context-Aware Email Generation:** Leverage the RAG capabilities to automatically draft intelligent, context-aware email replies to counterparties during the negotiation loop, replacing simple rule-based templates.
+
+### Phase 8: E-Signature & Execution Boundary - [PLANNED]
+* **Objective:** Cross the trust boundary by giving the SERA ecosystem the ability to legally bind the company and automatically execute finalized contracts.
+* **Deliverables:**
+  * **(C) DocuSign Connector:** Build a dedicated, reusable microservice within the SERA ecosystem to handle third-party e-signature APIs.
+  * **Outbound Envelope Generation:** Enable the LDA to dispatch finalized PDFs, signer details, and tagging coordinates to the DocuSign API via a standard gRPC call.
+  * **Inbound Webhook Listener (DocuSign Connect):** Expose a secure REST endpoint on the Sera AI Gateway to catch asynchronous signature events. Upon the `completed` event, the connector will automatically download the cryptographically sealed PDF to the `/assets/vault/` and trigger the state machine to advance to `executed`.
+
+### Phase 9: Continuous Learning & Self-Healing RAG - [PLANNED]
+* **Objective:** Create a zero-overhead Reinforcement Learning from Human Feedback (RLHF) loop. Instead of relying on expensive generalized fine-tuning, the system will crowdsource its accuracy directly from the Deal Desk and Legal teams using the platform.
+* **Deliverables:**
+  * **HITL Correction UI:** If the chatbot answers a question incorrectly (e.g., pulling the wrong termination clause), the user can browse the Split-Screen Document Explorer and flag the *correct* chunk that should have been retrieved.
+  * **The Golden RAG Cache:** The system saves this interaction (the user's original query vector + the correct `chunk_id`) in a dedicated PostgreSQL table, strictly scoped to that specific CMD Client Group.
+  * **Self-Healing Retrieval:** Modify the Legal Contract Retriever (LCR) to check this cache first. If a future user asks a semantically similar question (passing a high fuzzy/vector similarity threshold against the cached query), the LCR will automatically force-inject the human-validated chunk into the LLM's context window, bypassing standard vector similarity failures.
+  * **Result:** The RAG system becomes hyper-specialized and perfectly tuned to each specific customer's document quirks automatically over time.
