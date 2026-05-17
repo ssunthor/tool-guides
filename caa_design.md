@@ -1,6 +1,6 @@
 # Cash Application Assistant (CAA) - Design Document
 
-**Version:** 1.8.9
+**Version:** 2.2.8
 **Date:** 2026-02-21
 **Author(s):** Martin Kecka, Gemini AI
 **Category:** Assistant (A)
@@ -37,7 +37,8 @@ The system provides a user interface for monitoring the status of each transacti
 * **PostgreSQL Database:**
     * **State Machine:** `cash_application_process` (central orchestration state).
     * **Staging Layer:** `oracle_receipt_queue` (buffers transactions before ERP posting, supports 1:N splitting).
-    * **Learning/Cache:** `email_client_link` (email-to-client), `payer_client_links` (manual payer name overrides), and `rmi_open_invoice_match` (RMI match cache).
+    * **Audit & History:** `transaction_audit_logs` (dedicated event-sourced audit trail capturing structural system events, splits, manual interventions, and operator metrics).
+    * **Learning/Cache:** `email_client_link` (email-to-client), `payer_client_links` (manual payer name overrides), `rmi_open_invoice_match` (RMI match cache), and `feedback_logs` (capturing `context_data` JSONB before/after state snapshots).
     * **Master Data (Split Schema):**
         * `physical_bank_accounts`: Represents the actual bank ledger (owned by an Oracle Entity).
         * `cmd_business_units`: Represents the invoicing entity (CMD).
@@ -47,18 +48,10 @@ The system provides a user interface for monitoring the status of each transacti
 
 ### Outputs / Interactions:
 
-* **PostgreSQL Database:** Updates the `cash_application_process` table with status changes, linked data (client ID, RMI ID), applied invoices, and processing notes. Manages the Oracle Staging Queue.
-* **Redis:** Used for distributed locking in background services (`linking_service`, `invoice_matching_service`, `bsi_processing_service`, scheduled syncs) to prevent concurrent runs and API DDOSing.
-* **LLM Service (AI Factory):** Served via `vLLMClient` (OpenAI-compatible). Used by specific rules (e.g., `ApplyGlobalOrigAmtRule`, `MatchClientByOnBehalfOfRule`) and the feedback/resolution analysis feature.
-* **ORC (Oracle Connector):** gRPC connector used to sync receipt status, apply credit memos (`ApplyCreditMemo`), unapply credit memos, fetch live ERP data, and post receipts via SOAP Atomic requests (`CreateStandardReceipt`) followed by REST verification.
-* **User Interface:** A React SPA served by the FastAPI backend provides monitoring, the Oracle Reconciliation Workbench, manual rule configuration, and HITL resolution.
-
-### Outputs / Interactions:
-
-* **PostgreSQL Database:** Updates the `cash_application_process` table with status changes, linked data (client ID, RMI ID), applied invoices, and processing notes. Manages the Oracle Staging Queue.
-* **Redis:** Used for distributed locking in background services (`linking_service`, `invoice_matching_service`, `bsi_processing_service`) to prevent concurrent runs.
-* **LLM Service (AI Factory):** Used by specific rules (e.g., `ApplyGlobalOrigAmtRule`, `MatchClientByOnBehalfOfRule`) and the feedback analysis feature.
-* **ORC (Oracle Connector):** gRPC connector used to sync receipt status and post "Ready" receipts from the Staging Queue to the Oracle ERP (`CreateStandardReceipt`).
+* **PostgreSQL Database:** Updates the `cash_application_process` table with status changes, linked data, applied invoices, and processing notes. Manages the Oracle Staging Queue.
+* **Redis:** Used for distributed locking in background services (`linking_service`, `invoice_matching_service`, `bsi_processing_service`, scheduled syncs) to prevent concurrent runs and API DDOSing. Also utilizes Sorted Sets (ZSETs) for managing asynchronous, event-driven polling tasks (e.g., Intercompany Bridge generation via `cross_bu_worker.py`).
+* **LLM Service (AI Factory):** Served via `vLLMClient` (OpenAI-compatible) powered by Gemma-4-31B-it. Used by specific rules (e.g., `ApplyGlobalOrigAmtRule`, `MatchClientByOnBehalfOfRule`) and the feedback/resolution analysis feature.
+* **ORC (Oracle Connector):** gRPC connector used to sync receipt status, apply credit memos (`ApplyCreditMemo`), unapply credit memos, fetch live ERP data, and post receipts via SOAP Atomic requests (`CreateStandardReceipt` & `ApplyStandardReceipt`) followed by REST verification.
 * **User Interface:** A React SPA served by the FastAPI backend provides monitoring, the Oracle Reconciliation Workbench, manual rule configuration, and HITL resolution.
 
 ---
@@ -241,7 +234,8 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         1.  Checks if BSI invoices conflict with RMI invoices (Safeguard).
         2.  Validates that RMI invoices exist as open items for the *linked client* and amounts match perfectly.
         3.  **Total Sum Fallback:** If individual line-item matching fails (e.g., bad OCR on one invoice number reading $10 as $70), the rule calculates the sum of *all found* open invoices referenced in the RMI. If this sum matches the `payment_amount` (within tolerance), it ignores the bad line data and applies the payment.
-        4.  **Stale Cache Safeguard:** If no open invoices are found for an email-linked client, it triggers a *live* CMC call (`get_client_by_email`). If the live client ID is *different* from the cached one, it updates the process's `cmd_client_id` and re-runs the stack.
+        4.  **Global Rescue & Client Auto-Correct:** If no open items are found for the linked client, it searches globally for the RMI invoices. If they align perfectly under a *different* single client, it automatically corrects the transaction's client link and updates the `EmailClientLink` learning cache to prevent future fallout.
+        5.  **Stale Cache Safeguard:** If no open invoices are found (and global rescue fails) for an email-linked client, it triggers a *live* CMC call (`get_client_by_email`). If the live client ID is *different* from the cached one, it updates the process's `cmd_client_id` and re-runs the stack. Implements a strict `_has_retried` loop guard to prevent infinite ping-pong loops between Global Rescue and Live CMC re-validation.
     * **Conclusive Outputs:** `applied_rmi_direct`, `hitl_needed` (mismatch).
 
 4.  **`ApplyRmiGroupRule`**
@@ -255,7 +249,15 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         2. **Phase 2 (Global):** If amounts remain unmatched, it searches GLOBALLY for those specific amounts. Supports partial application.
     * **Conclusive Outputs:** `applied_rmi_amount_match`, `hitl_rmi_multi_customer_partial`.
 
-6.  **`ApplyNettedBsiRule`**
+6.  **`ApplyBsiSingleFxHintRule`**
+    * **Purpose:** Handles cross-currency payments (e.g., DKK paying a USD invoice) where BSI extracted exactly ONE unambiguous invoice hint and the bank omitted the exchange rate from the raw text.
+    * **Logic:** 
+        1. Calculates the mathematically implied FX rate (Payment Received / Invoice Balance) based on the single extracted invoice.
+        2. Performs a live market sanity check via `fx_rate_service.py` (fetching from the Frankfurter API and utilizing Redis caching).
+        3. Applies the payment if the implied rate is within a safe 5% tolerance of the daily market rate. (If the API is down, it falls back to a loose bounding box to prevent extreme OCR hallucinations).
+    * **Conclusive Outputs:** `applied_bsi_single_fx_hint`.
+
+7.  **`ApplyNettedBsiRule`**
     * **Purpose:** To apply a payment that matches the sum of a *group* of invoices/memos (>= 2) that were extracted directly by BSI.
     * **Logic:**
         1.  Requires `BsiTransaction.extracted_invoice_numbers` to have 2 or more items. Deduplicates identical rows based on BSI array frequency.
@@ -266,7 +268,7 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         6.  **Partial Match Tolerance:** If *not all* BSI invoices were found (e.g., some were missing), it checks if the sum of the *remaining* items matches the `target_amount` (within a looser 0.10 tolerance).
     * **Conclusive Outputs:** `applied_bsi_netted`, `applied_bsi_netted_orig_amt`, `applied_bsi_partial_net`, `applied_bsi_netted_fx`.
 
-7.  **`ApplyBsiRawFxRule`**
+8.  **`ApplyBsiRawFxRule`**
     * **Purpose:** To apply an FX payment by parsing raw, unstructured text when `ApplyInstructedAmtRule` fails.
     * **Logic:**
         1.  Parses `raw_bank_text` for regex patterns: `SETT-AMT: [CUR] [AMT]` and `RATE: [RATE]`.
@@ -275,7 +277,7 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         4.  **Application Check:** Validates that the `Settlement Amount` matches the `sum(balance)` or `sum(original_amount)` of the BSI-extracted invoices (which must be in the `Settlement Currency`).
     * **Conclusive Outputs:** `applied_bsi_raw_fx`, `hitl_needed`, `error`.
 
-8.  **`ApplyInstructedAmtRule`**
+9.  **`ApplyInstructedAmtRule`**
     * **Purpose:** To apply a 1:1 FX payment using BSI's structured `instructed_amount` field.
     * **Logic:**
         1.  Checks if `BsiTransaction.instructed_amount` and `instructed_currency` are present and different from the payment currency.
@@ -283,7 +285,7 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         3.  **BSI Hint Priority:** Strongly prioritizes invoices explicitly extracted by BSI over generic oldest-first matching if multiple items share the same amount.
     * **Conclusive Outputs:** `applied_bsi_instructed_amount`.
 
-9.  **`ApplyNetFeeRule`**
+10. **`ApplyNetFeeRule`**
     * **Purpose:** To apply a 1:1 payment where a bank fee was deducted or included.
     * **Logic:**
         1.  Finds a *separate* debit (`D`) transaction in the `bsi_transactions` table that shares the *same `bank_reference`* and contains a fee keyword (dynamically fetched from `skip_rules`).
@@ -291,7 +293,15 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         3.  It then queries `open_invoices` for the client to find a single item where `balance` matches either calculated target.
     * **Conclusive Outputs:** `applied_amount_client_net_fee`, `hitl_needed` (ambiguous).
 
-10. **`SafeguardBsiInvoicesRule`**
+11. **`ApplyImplicitFeeRule`**
+    * **Purpose:** Resolves cross-border 'lifted' fees (e.g., SWIFT intermediary charges) where the fee isn't explicitly itemized by the bank.
+    * **Logic:**
+        1. Auto-detects known cross-border transaction codes (e.g., Deutsche Bank '202' or 'ZI28') based on the `IMPLICIT_FEE_CONFIG`.
+        2. Tests if adding an expected hidden fee (e.g., 25 EUR) bridges the gap to a perfect invoice balance.
+        3. If an exact net match is found, it piggybacks on the existing Net Fee staging logic to stage the missing cash as a distinct fee offset.
+    * **Conclusive Outputs:** `applied_amount_client_net_fee`.
+
+12. **`SafeguardBsiInvoicesRule`**
     * **Purpose:** Data Rescue & Safety Gate. Ensures BSI-extracted invoices are not bypassed.
     * **Logic:** 1. Performs a **Live ERP Rescue** via CMC to fetch any unapplied BSI invoices (even if closed in ERP).
         2. **Merges** the newly found (Closed) invoices with existing (Open) matches.
@@ -300,51 +310,56 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         5. **Strict Block:** If the sum mismatches or items are truly missing, it strictly blocks the engine from falling back to heuristic (amount-based) matching and forces a HITL review.
     * **Conclusive Outputs:** `applied_bsi_netted`, `applied_closed_invoice`, `hitl_bsi_amount_mismatch`, `hitl_needed`.
 
-11. **`ApplyBsiGroupRule`**
+13. **`ApplyBsiGroupRule`**
     * **Purpose:** To apply a payment that matches the total sum of *all* open items for a client on a specific timeframe.
     * **Logic:**
         1.  **Anchor:** If BSI extracted an invoice, it finds that invoice's `posting_date` and uses it as the `target_date`.
-        2.  **Remainder Logic:** If the extracted invoice is only a partial match, searches for *other* open invoices on that same date to fill the remaining balance. If the exact day fails, it expands to check a **30-day window** (`+/- 30 days` from the anchor).
-        3.  **No Anchor:** If BSI extracted no invoices, this rule iterates through *every* open posting date for the linked client to find a `sum` match.
-        4.  Checks if `sum(balance)` OR `sum(original_amount)` matches the `payment_amount` (within 0.10 tolerance).
+        2.  **1:1 Yield Guardrail:** If the BSI anchor invoice perfectly matches the payment amount on its own, it strictly yields to standard 1:1 matching rules, bypassing the group sum logic to prevent misclassification.
+        3.  **Remainder Logic:** If the extracted invoice is only a partial match, searches for *other* open invoices on that same date to fill the remaining balance. If the exact day fails, it expands to check a **30-day window** (`+/- 30 days` from the anchor).
+        4.  **No Anchor:** If BSI extracted no invoices, this rule iterates through *every* open posting date for the linked client to find a `sum` match.
+        5.  Checks if `sum(balance)` OR `sum(original_amount)` matches the `payment_amount` (within 0.10 tolerance).
+        6.  If multiple groups match (Ambiguous), it explicitly evaluates all matching groups and applies to the **oldest** one.
     * **Conclusive Outputs:** `applied_bsi_group_orig_amt`, `applied_bsi_group_bal`. If no group sum matches *and* no anchor was used, it checks the *total* client balance and can set `hitl_client_total_mismatch`.
 
-12. **`ApplyBsiGroupWithCreditMemoRule`**
+14. **`ApplyBsiGroupWithCreditMemoRule`**
     * **Purpose:** Matches payment against the NET SUM of all open items (Invoices + Credit Memos) for a Client Group.
     * **Logic:** Strictly requires that at least one negative balance (Credit Memo) is present in the group. If not, it yields to standard rules to prevent misclassification of simple 1:1 matches.
     * **Conclusive Outputs:** `applied_bsi_group_with_cm`.
 
-13. **`ApplyOrigAmtRule`**
+15. **`ApplyOrigAmtRule`**
     * **Purpose:** 1:1 match on Original Amount.
     * **Logic:**
         1.  Finds all open invoices for the linked client where `original_amount` == `payment_amount` and `currency` matches.
-        2.  **Crucial Check:** This rule *only* applies if the matched invoice's current `balance` *also* matches the `payment_amount`.
-        3.  If `original_amount` matches but `balance` differs (e.g., a partial payment was already made), the rule is *inconclusive* and fails, preventing a misapplication.
-        4.  **BSI Hint Priority:** Strongly prioritizes invoices explicitly extracted by BSI over generic oldest-first matching if multiple items match.
+        2.  **Group-Level Fallback:** If the payment is strictly linked to one entity but no match is found, it gracefully expands its search to the entire *Client Group*. If a unique match is found, it auto-corrects the target client.
+        3.  **Crucial Check:** This rule *only* applies if the matched invoice's current `balance` *also* matches the `payment_amount`.
+        4.  If `original_amount` matches but `balance` differs (e.g., a partial payment was already made), the rule is *inconclusive* and fails, preventing a misapplication.
+        5.  **BSI Hint Priority:** Strongly prioritizes invoices explicitly extracted by BSI over generic oldest-first matching if multiple items match.
     * **Conclusive Outputs:** `applied_amount_client`, `applied_amount_client_oldest`.
 
-14. **`ApplyBalanceMatchRule`**
+16. **`ApplyBalanceMatchRule`**
     * **Purpose:** 1:1 match on Current Balance.
     * **Logic:**
         1.  Finds all open invoices for the linked client where `balance` == `payment_amount` and `currency` matches.
-        2.  If one or more matches are found, it applies the payment to the oldest one (by `due_date`/`posting_date`).
+        2.  **Group-Level Fallback:** If no match is found for the specific client, it expands the search to the entire *Client Group*. If a unique match is found, it auto-corrects the target client.
+        3.  If one or more matches are found, it applies the payment to the oldest one (by `due_date`/`posting_date`).
     * **Conclusive Outputs:** `applied_balance_client`, `applied_balance_client_oldest`.
 
-15. **`ApplyPaidAmountMatchRule`**
+17. **`ApplyPaidAmountMatchRule`**
     * **Purpose:** Applies payment that matches the *difference* between Original Amount and Balance.
     * **Logic:** Queries open invoices where `(OriginalAmount - Balance) == PaymentAmount`. This handles cases where the customer pays the "paid portion" or reconciles a specific ledger state.
     * **Conclusive Outputs:** `applied_paid_amt_match`.
 
-16. **`ApplyGlobalOrigAmtRule`**
+18. **`ApplyGlobalOrigAmtRule`**
     * **Purpose:** Global 1:1 Fallback (Client not linked).
     * **Logic:**
         1.  Queries globally for `original_amount == payment_amount`.
-        2.  **1 Match:** Links the client from that invoice and applies the payment.
-        3.  **>1 Match (Same Client):** Applies to the oldest.
-        4.  **>1 Match (Diff Clients):** Uses an **LLM** (via `vLLMClient` and `rule6_disambiguator` prompt) to compare the BSI Payer Name against the candidate client names. If the LLM returns a single, confident match, it links that client and applies the payment.
+        2.  **Baseline Fuzzy Safeguard:** Checks if the bank payer name and the candidate client name are completely dissimilar (e.g., <50% match score). If so, it safely aborts to prevent applying to unrelated clients.
+        3.  **1 Match:** Links the client from that invoice and applies the payment.
+        4.  **>1 Match (Same Client):** Applies to the oldest.
+        5.  **>1 Match (Diff Clients):** Uses an **LLM** (via `vLLMClient` and `rule6_disambiguator` prompt) to compare the BSI Payer Name against the candidate client names. If the LLM returns a single, confident match, it links that client and applies the payment.
     * **Conclusive Outputs:** `applied_amount_global`, `hitl_needed` (ambiguous, LLM failed).
 
-17. **`ApplyPartialBsiRefRule`**
+19. **`ApplyPartialBsiRefRule`**
     * **Purpose:** Global Group Fallback.
     * **Logic:**
         1.  Uses `InvoiceParserHelper` to find *only* numeric strings (e.g., '12345') in the BSI raw text that match the *length* of known invoice rules (e.g., a 5-digit rule).
@@ -353,7 +368,7 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         4.  If all found items belong to a **single, unambiguous client group** and their `sum(balance)` matches the `payment_amount`, it links the client and applies the payment.
     * **Conclusive Outputs:** `applied_bsi_ref`, `hitl_needed` (ambiguous).
 
-18. **`OverrideClosedStatusRule`**
+20. **`OverrideClosedStatusRule`**
     * **Purpose:** Final Gatekeeper. 
     * **Logic:** Runs immediately after a successful application. It verifies if the applied invoices are locally marked as 'CLOSED' or have 0 balance. If ALL applied invoices are closed, it overrides the process status to `applied_closed_invoice`. This ensures the match is recorded but prevents erroneous double-posting to the ERP.
 
@@ -436,14 +451,17 @@ The Cash Application Assistant utilizes a suite of robust background services an
     * **Sequence Generation:** Generates continuous Oracle Receipt Numbers (e.g., `DB9141.02212026.001`) using the account's last 4 digits. Explicitly prevents excluded transactions (Fees, Internal) from consuming sequence numbers, maintaining a gap-free audit trail.
     * **Balance Reconciliation:** Extracts Opening/Closing balances directly from the BSI file headers and calculates real-time variance against the sum of the staged queue (`Posted + Ready + HITL + Excluded`).
     * **Lockbox Detection (`BofaStagingRule`):** Detects `CHECK` and `LOCKBOX` op-codes. Separates summary deposits (Code 115) with a `SUM` prefix to prevent double-posting, and individual checks with a `CHK` prefix (or exact check number parsed from Addenda). Forces the receipt method to `GTT Lockbox Receipts`.
-    * **Cross-Currency FX Logic (`FxStagingRule`):** When payment currency differs from invoice currency, calculates the exact FX rate (`bsi_ledger_amount` / `bsi_original_amount`). Stages the Oracle receipt in the Ledger Currency for bank reconciliation, while writing the application reference in the Foreign Currency.
-    * **Cross-BU Bridging:** Identifies if an applied invoice belongs to a Business Unit distinct from the receiving bank account's Oracle BU. Automatically flags the receipt type as `cross_bu`, anticipating Oracle's Bridged Receipt workflow (Write-Off -> Standard Receipt).
-    * **Credit Memo Segregation:** Isolates negative target amounts or explicit 'CR' prefixes into a distinct `credit_memo` receipt type (Status: `cm_pending`). Ensures they do not consume the main payment waterfall cash total.
-    * **Underpayment / Ghost Receipts:** Uses a strict waterfall logic prioritizing explicitly selected invoices. If funds run out, unpaid invoices generate "Ghost Receipts" (Status: `underpayment`, Prefix: `DEFICIT_`). These are informational only, excluded from ledger variance math and ERP posting.
+    * **Cross-Currency FX Logic (`FxStagingRule`):** When payment currency differs from invoice currency, calculates the exact FX rate (`bsi_ledger_amount` / `bsi_original_amount`). Stages the Oracle receipt in the Ledger Currency for bank reconciliation, while writing the application reference in the Foreign Currency. Overridden cross-currency receipts explicitly scale down the ledger amount to match the clamped invoice amount, ensuring the ERP calculates the correct market FX rate and preventing false exchange losses.
+    * **Cross-BU Bridging & Asynchronous Queuing:** Identifies if an applied invoice belongs to a Business Unit distinct from the receiving bank account's Oracle BU. Automatically flags the receipt type as `cross_bu`. To handle Oracle PROD environments where Intercompany (IC) receipts are generated by scheduled background processes, the orchestrator intercepts the `Pending_Oracle_Automation` status, stages it as `Pending IC Bridge`, caches routing variables (`cross_bu_context` JSONB) into a Redis Sorted Set (ZSET), and waits for the asynchronous micro-worker to finish application. If delayed beyond 60 minutes, it routes to `HITL (IC Bridge Timeout)`. A follow-up REST POST is executed after successful SOAP IC application to forcefully attach the Invoice Reference metadata to the automated Oracle Child Receipt.
+    * **Credit Memo Segregation & Safety:** Isolates negative target amounts or explicit 'CR' prefixes into a distinct `credit_memo` receipt type (Status: `cm_pending`). Ensures they do not consume the main payment waterfall cash total. A strict safety gate drops self-referencing CM applications (e.g., applying CR123 to target invoice CR123) to prevent opaque Oracle errors.
+    * **Credit Memo BAN Priority:** CM waterfall netting logic strictly prioritizes netting against positive invoices that share the *exact same Customer BAN* before evaluating remaining items. Exact allocation amounts are recorded explicitly inside the CM's `references` array during initial staging, replacing sibling guesswork during the final Oracle push.
+    * **Underpayment, Ghost Receipts, & Bank Fees:** Uses a strict waterfall logic prioritizing explicitly selected invoices. If funds run out, unpaid invoices generate "Ghost Receipts" (Status: `underpayment`, Prefix: `DEFICIT_`). If a positive cash remainder perfectly matches a BSI `charges_amount`, it auto-stages the remainder as a 'Bank Fee Offset'. Implicit bank fees and short payments apply a consistent `DEFICIT_FEE_` prefix to non-cash fee deductions, ensuring these rows are excluded from ledger cash sums while maintaining proper ERP offsets. Explicit bank fees (`charges_amount`) are prioritized over internal calculations to stage cross-currency fees perfectly.
     * **Historical Lookups:** For transactions matched to already-paid invoices (`STATUS_APPLIED_CLOSED_INVOICE`), the service queries the live ERP to retrieve the *actual* historical Oracle Receipt Number that originally closed the invoice, embedding this in the UI.
-* **Bi-Directional Sync Protocol:**
-    * Executes a **SOAP Atomic** request (`CreateStandardReceipt`) to post fully applied receipts directly to invoices.
+* **Bi-Directional Sync Protocol & Safety Gates:**
+    * Executes a **SOAP Atomic** request (`CreateStandardReceipt`) to post fully applied receipts directly to invoices. The orchestrator explicitly drops `AmountReceiptCurrency` and `ExchangeRate` payload fields when passing a 1.0 normalized rate for same-currency transactions to prevent Oracle API rejections.
     * Immediately issues a **REST verification** fetch (`GetStandardReceipts`) to retrieve the generated `StandardReceiptId`, `CreationDate`, and confirmation `State`, syncing the local staging record.
+    * **Smart Batch Posting Safety Gate:** During bulk posting, the system intelligently evaluates variance at the *individual transaction level* rather than locking the entire account batch. Mismatched transactions are dynamically disabled and flagged in the Post Batch dialog.
+    * **Smart Unapplied Routing:** Intelligently detects if a receipt has zero invoice targets (e.g., Overpayments) and automatically routes the API push to the 'Unapplied / On Account' ERP workflow. The backend API correctly inherits the exact BAN from sibling invoices within the same bank transaction.
 
 ### 5.5 RMI Invoice Matching Service (`invoice_matching_service.py` & `rmi_rule_engine.py`)
 * **Purpose:** Proactively evaluates unlinked Remittance Advice records against the open invoice ledger. Pre-calculates match viability to populate the `rmi_open_invoice_match` cache, accelerating the main orchestrator and providing immediate feedback in the Remittance UI.
@@ -501,6 +519,14 @@ The Cash Application Assistant utilizes a suite of robust background services an
 * **Purpose:** Integrates with the centralized SERA API gateway to fetch the active directory list of authorized Finance operators (e.g., `SERA-Group-Collections`), utilizing a 5-minute in-memory cache to prevent network saturation.
 * **Volume Analytics:** Evaluates the trailing 90-day history of bank transactions (`BsiStatementFile` joined with `BsiTransaction`) to analyze operational volume. It automatically categorizes accounts into health tiers (Active, Auto-Excluded, Dormant, Hidden) based on actionable cash received, allowing system administrators to map "Daily Default Assignees" strictly to active, revenue-generating ledgers.
 
+### 5.8 Event-Driven Polling Engine (`cross_bu_worker.py`)
+* **Purpose:** A highly efficient, lightweight micro-worker specifically handling Oracle Intercompany (IC) Bridge automation delays.
+* **Mechanism:** Utilizes Redis Sorted Sets (ZSETs) to manage delayed tasks. It polls for Oracle IC child receipt generation every 2 minutes with zero idle database load. If the child receipt isn't generated within **60 minutes**, it safely times out and routes the item to the `HITL (IC Bridge Timeout)` queue for manual intervention.
+
+### 5.9 Market FX Rate Service (`fx_rate_service.py`)
+* **Purpose:** Provides daily market exchange rates to validate and sanity-check OCR and parsing logic on cross-currency transactions.
+* **Mechanism:** Fetches daily rates from the Frankfurter API and utilizes Redis caching to prevent API rate-limit spam, providing a baseline ground truth for rules like `ApplyBsiSingleFxHintRule`.
+
 ## 6. Manual Intervention & Learning System
 
 The system is designed to improve over time via Human-in-the-Loop (HITL) interactions. The UI provides specialized diagnostic workflows to resolve ambiguous cases and seamlessly resume automation.
@@ -524,9 +550,16 @@ The system is designed to improve over time via Human-in-the-Loop (HITL) interac
     * **Rule Creation:** The UI allows converting these one-off actions into permanent `SkipRule` database entries. These rules support multi-criteria AND logic (e.g., matching Payer Name AND Transaction Text simultaneously) and can be scoped globally or to specific Bank Groups.
 
 5.  **Auto-Feedback Loop & Global Analysis:**
-    * When a user manually edits a receipt amount or invoice application in the Staging area, `feedback_processor.py` captures the "diff".
-    * It uses an LLM (`vLLMClient`) to analyze *why* the user made the change (e.g., "User added $15 fee to match the invoice balance") and logs it for system tuning.
-    * Users can also submit manual feedback tickets. The AI analyzer contextually switches between analyzing raw RMI emails (parsing errors) and full end-to-end process logs (application logic/rules errors) to suggest solutions.
+    * When a user manually edits a receipt amount or invoice application in the Staging area, `feedback_processor.py` captures the "diff". This diff explicitly tracks and displays the exact invoice numbers added or removed during manual UI splits to provide precise context.
+    * It uses an LLM (`vLLMClient` powered by Gemma-4-31B-it) to analyze *why* the user made the change (e.g., "User added $15 fee to match the invoice balance") and logs it for system tuning.
+    * **Raw Context Viewer:** The auto-feedback engine explicitly captures and persists the exact JSON state snapshot (`context_data`) before and after a user modification. Operators can view this raw data payload directly in the Feedback Inbox to better understand the AI's analysis.
+    * **Enhanced Visibility:** The auto-generated feedback summary explicitly states the starting status of the receipt (e.g., `Receipt ACH2019... (in 'hitl')`) and captures the `display_name` of the specific user who modified the receipt, prepending their name to the diff summary.
+    * **Cash Application Process Deep Linking:** Users can create feedback tickets directly from bank transactions on the Cash Application Process page. The ticket includes a bank icon that navigates to the exact Cash Application Process item, featuring a hover description: "View Linked Cash Application Process: {cash_appliction_process_id}".
+    * **Screenshot Integration:** Operators are able to paste screenshots when submitting a feedback ticket in the FeedbackDialog. Images are stored in `ai/cash_application_assistant/assets/faq/` and displayed in the submitted ticket with click-to-zoom capability. Deleting the ticket from the UI permanently deletes the database record and the associated image file.
+
+6.  **Dedicated Transaction Audit Logging:**
+    * High-impact structural system events (Manual Splits, Deletes, Live ERP Syncs, Restages, Auto-Bridges) and all operator field modifications are permanently recorded in the isolated `transaction_audit_logs` table.
+    * This event-sourced audit trail keeps the Feedback Inbox strictly focused on AI analysis and UX feedback, while natively powering the Operator Leaderboard Analytics.
 
 ---
 
@@ -539,12 +572,13 @@ The **Oracle Staging Viewer** acts as a final firewall before data enters the ER
 1.  **Split Staging Architecture (1:N):**
     * Migrated from a 1:1 model to a 1:N model. A single bank transaction is exploded into a separate Oracle receipt for every individual invoice matched, improving ERP reconciliation accuracy.
 
-2.  **Balance Reconciliation Logic:**
+2.  **Balance Reconciliation Logic & Transaction-Level Variance Flagging:**
     * The view pulls **Opening Balance** and **Closing Balance** directly from the BSI Statement File (`bsi_statement_files` table).
     * It calculates a **Projected Closing Balance** by summing the amounts of all cash transactions in the staging queue (`Posted`, `Ready`, `HITL`, `Excluded`). Credit Memos are ignored in this sum as they are non-cash adjustments.
     * **Variance Check:** It compares the `Projected` vs `Actual` Closing Balance.
         * **Green:** Zero Variance (The queue perfectly matches the bank statement).
         * **Red:** Variance detected (Funds are missing from the queue or amounts are incorrect).
+    * **Transaction-Level Variance Flagging:** The transaction header calculates the sum of all staged cash items in real-time (explicitly excluding all `DEFICIT_` and `fees` prefix rows) and flags mismatches against the original bank ledger amount with a warning icon and high-visibility red styling. This allows operators to instantly isolate problematic transactions (e.g., ghost duplicates or manual entry errors) without relying solely on the account-level balance summary.
 
 3.  **Sequence Logic & Gap Prevention:**
     * Oracle Receipt Numbers are generated automatically using the pattern `{BankPrefix}{Last4}.{MMDDYYYY}.{Sequence}` (e.g., `DB9141.11272025.001`).
@@ -554,39 +588,55 @@ The **Oracle Staging Viewer** acts as a final firewall before data enters the ER
     * **Active Items:** Receipts that require action (`Ready`, `HITL`, `Error`) are grouped at the top.
     * **Credit Memos:** Identified and isolated with distinct Pink styling (`cm_pending`). They do not consume the main payment waterfall cash total.
     * **Lockbox Transactions:** Detected via BSI addenda (Code 115 summaries vs individual checks) and marked with distinct Purple styling. They are strictly routed to the 'GTT Lockbox Receipts' method.
-    * **Ghost Receipts (Underpayments):** If funds run out during waterfall application, unpaid invoices generate "Ghost" receipts (Prefix: `DEFICIT_`). These are informational only, excluded from ledger variance math and ERP posting.
+    * **Ghost Receipts & Bank Fees:** If funds run out during waterfall application, unpaid invoices generate "Ghost" receipts (Prefix: `DEFICIT_`). Non-cash fee deductions utilize the `DEFICIT_FEE_` prefix. Both ghost receipts and explicit `fees` rows are universally excluded from ledger cash variance math while maintaining proper accounting offsets for the ERP.
+    * **Cross-Transaction Duplicate Highlighting:** The UI automatically detects and visually flags invoices that are targeted multiple times within the same daily batch. Duplicate invoice numbers are highlighted in red with a warning icon to alert operators to overlapping payments before ERP posting.
 
 5.  **Granular Task Assignment & Audit Trail:**
     * **Batch & Item Assignment:** Users can "Grab" an entire batch (all receipts for an account/date) or individual transactions.
+    * **Smart Assignment Routing & Load Balancing:** Workload assignments can be split within a single bank account based on the Oracle Receipt Prefix (e.g., 'ACH', 'WIRE'). When multiple operators share a rule, the system load-balances receipts using an MD5 hash of the Customer BAN to preserve customer continuity. A calendar-aware 'Monday Catch-up' logic automatically pushes assignments for the trailing 3 weekend days.
     * **Locking & Overrides:** Assigned items display a "Locked" chip with the owner's name. Users can release their own locks or perform a "Force Override" on others.
-    * **My Work View:** A "My Assignments Only" toggle instantly filters the workbench to show only the user's active workload.
-    * **Auditability:** Every row persists `assigned_to_user_id`, `last_updated_by`, and `posted_by` fields.
+    * **My Work View:** A "My Assignments Only" toggle instantly filters the workbench to strictly isolate and display only the user's active workload blocks.
+    * **Auditability & Deletion Logs:** Every row persists `assigned_to_user_id`, `last_updated_by`, and `posted_by` fields. Additionally, deleting a receipt requires a mandatory reason that is permanently recorded, along with the operator's name, in the Feedback Inbox.
 
 6.  **Advanced Edit Capabilities & Excel-Mode Splitting:**
-    * Users can modify **Receipt Number**, **Comments**, **Currency**, and **Applied Invoices** via a modal dialog.
-    * **Split & Allocate Dialog:** A spreadsheet-like interface allowing users to split a single bank transaction into unlimited receipt lines across multiple BANs and invoice lists. It includes an "Auto-Balance" calculator to instantly determine the remainder needed to balance the transaction to zero.
+    * Users can modify **Receipt Number**, **Comments**, and **Currency** via a modal dialog.
+    * **Smart Edit Auto-Split:** If an operator manually reduces the cash amount on a receipt (e.g., to pay a specific invoice), the system automatically generates a new 'Overpayment' receipt for the remainder to enforce a strict 1:1 match with the bank deposit total. The 'Applied Invoices' field is strictly read-only to prevent bypassing the staging logic; the dialog is also fully CM-aware, unpacking and repackaging internal target offsets without data loss.
+    * **Split & Allocate Dialog:** A spreadsheet-like interface allowing users to split a single bank transaction into unlimited receipt lines across multiple BANs. It features an "Auto-Balance" calculator and explicitly differentiates between 'Cash' receipts and 'Non-Cash' offsets (like Credit Memos and 'Bank Fee Offset'). A soft warning allows operators to safely override mathematically unbalanced cash allocations.
+    * **Bulk Import:** Users can copy and paste transaction splits directly from Excel or CSV into the dialog with auto-delimiter detection and an 'Overwrite existing rows' toggle.
+    * **Placeholder Safeguard:** If an operator deletes the last remaining receipt row for a transaction, the system instantly spawns a full-amount 'Placeholder' receipt in `HITL` status, preventing the transaction from vanishing and causing confusing ledger variances.
 
 7.  **Credit Memo Management & Waterfall Application:**
-    * Clicking a Credit Memo opens the `CreditMemoDetailsDialog` to view live application history and optionally **Unapply** specific invoices directly from the UI.
+    * Clicking a Credit Memo opens the `CreditMemoDetailsDialog` to view live application history and optionally **Unapply** specific invoices directly from the UI. The UI actively prevents operators from accidentally saving a Credit Memo that targets its own receipt number.
     * During batch posting, Credit Memos utilize a **Waterfall Application Strategy**: They distribute their value across multiple sibling receipts (prioritizing identical BANs first, then highest amounts) if the credit balance exceeds a single target invoice.
 
 8.  **Cross-BU Bridging & Cross-Currency Display:**
-    * **Cross-BU:** Detects when a payment targets an invoice in a different Business Unit. Stages as a `Cross-BU` transaction, and upon posting, displays both the **Parent Receipt** (Write-Off in the payment BU) and **Child Receipt** (Applied in the target BU) IDs.
-    * **Cross-Currency:** Displays both the Ledger Currency (e.g., RON) and the Foreign Invoice Currency (e.g., EUR) simultaneously, performing real-time FX math to balance the ledger.
+    * **Cross-BU:** Detects when a payment targets an invoice in a different Business Unit. Stages as a `Cross-BU` transaction (`cross_bu_pending`), displaying a `Pending IC Bridge` UI state with a spinning Sync icon while waiting on Oracle's scheduled automation. If delayed beyond 60 minutes, it falls to `HITL (IC Bridge Timeout)`. Upon posting, it displays both the **Parent Receipt** and **Child Receipt** IDs.
+    * **Cross-Currency:** Displays both the Ledger Currency (e.g., RON) and the Foreign Invoice Currency (e.g., EUR) simultaneously, performing real-time FX math to balance the ledger. Manually overriding a cross-currency receipt proportionally scales down the ledger amount to match the clamped invoice amount, ensuring the ERP calculates the correct market FX rate and averting false exchange losses.
 
 9.  **Live Oracle Validation & Historical Context:**
     * **Posted Receipts:** Clicking a receipt number fetches the live JSON payload from Oracle, confirming accounting dates and states.
     * **Closed Invoices:** For transactions matched to already-closed invoices, the UI dynamically fetches and displays the *actual historical Oracle Receipt Number* that originally closed the invoice. Clicking it reveals exactly who/what paid the invoice previously.
+    * **High-Severity Visibility:** Transactions matched against already-paid invoices are heavily styled with a bold red error background and 'ALREADY PAID' status chip to prevent accidental double-posting.
 
 10. **Advanced Search & Interactive Filtering:**
-    * A powerful search bar allows instantly finding transactions by Receipt Number, Payer Name, BAN, IBAN, Amount, or Invoice Number.
-    * **Transaction-Aware Filters:** Clicking summary pills (e.g., "52 HITL") filters the view but intelligently preserves the **full transaction context**. Sibling receipts (e.g., the "Ready" portion of a partially failed split transaction) remain visible alongside the error.
+    * A powerful global search bar allows finding transactions by Receipt Number, Payer Name, BAN, IBAN, Amount, or Invoice Number. Features 1-Click Copy icon buttons next to Receipt and Invoice numbers.
+    * **Extended Quick Filters & Instant Daily Search:** Operators can filter the staging view by `Bank Fees`, `Underpayments (Deficits)`, `Overpayments`, and `Transaction Type` (Lockbox, Credit Memos, Standard). An Instant Daily Quick Filter search bar isolates receipt number, amount, BAN, or client name across the currently loaded batch with zero server lag.
+    * **Transaction-Aware Filters:** Clicking summary pills filters the view but intelligently preserves the **full transaction context**. Sibling receipts remain visible alongside the error.
     * **Sorting:** Transactions within an account group can be sorted dynamically by Amount (Low to High / High to Low), Customer, BAN, or Receipt Number.
 
 11. **Bi-Directional Sync & Direct Posting:**
-    * **Push:** Bulk-posts "Ready" and "CM_Pending" items to Oracle via the ORC Connector using **SOAP Atomic** requests (allowing fully applied receipts in one step), immediately followed by REST verification.
-    * **Post Unapplied:** Ability to bypass invoice application entirely and post raw cash directly to Oracle as "Unapplied" (On Account) for complex fallout scenarios.
-    * **Sync:** Users can manually sync specific receipts. The system handles Idempotency (Duplicate `AR-857749` errors) by fetching the existing receipt and marking the local record as `POSTED`.
+    * **Push & Safety Gate:** Bulk-posts "Ready" and "CM_Pending" items to Oracle via the ORC Connector using **SOAP Atomic** requests. The Smart Batch Posting Safety Gate evaluates variance at the individual transaction level (dynamically disabling and flagging mismatched transactions in the dialog) rather than locking down the entire account batch.
+    * **Smart Unapplied Routing:** Intelligently detects if a receipt has zero invoice targets (e.g., Overpayments) and automatically routes the API push to the 'Unapplied / On Account' ERP workflow, resolving the BAN dynamically.
+    * **Live ERP Rescue on Regeneration:** The 'Regenerate Receipts' action on blocked transactions performs an instant live check against the Oracle ERP, fetching restored balances immediately (bypassing the 6-hour sync delay) and staging the receipt as 'Ready'.
+    * **Sync & Idempotency Trap Fix:** Users can manually sync specific receipts. The Oracle Read-After-Write verification tracks the newly minted `StandardReceiptId` directly from the SOAP creation payload to the REST verification fetch, guaranteeing exact 1:1 retrieval and avoiding old, reversed receipts.
+
+12. **Transaction History Timeline:**
+    * A comprehensive, chronological timeline view showing the entire lifecycle of a transaction from initial AI orchestration, through manual edits and splits, to final ERP posting.
+    * **Time Travel State Reconstruction:** Parses historical audit logs to accurately display the exact original state (Amount, BAN, Invoices, Status) of a receipt the moment it was initially staged, prior to any manual user modifications.
+    * **Audit Payload Visibility:** Captures and logs the exact JSON payload sent to the ERP even when an API call fails, dramatically improving debugging for Oracle rejection errors (e.g., missing invoices, closed periods).
+
+13. **Oracle Remittance Name Headers:**
+    * The staging account group headers display the full Oracle Remittance Name (e.g., 'Deutsche Bank 68 EUR 9000') alongside the BSI Account Number as a muted chip. This allows operators to instantly identify and reconcile bank accounts using familiar ERP naming conventions.
 
 ---
 
