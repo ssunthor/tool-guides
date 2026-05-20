@@ -1,7 +1,7 @@
 # Legal Document Parser (LDP) - Design Document
 
-**Version:** 1.1.0
-**Date:** 2026-05-14
+**Version:** 0.2.0
+**Date:** 2026-05-08
 **Author(s):** Martin Kecka, Gemini AI
 **Category:** Processor (P)
 **Acronym:** LDP

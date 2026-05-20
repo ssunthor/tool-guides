@@ -1,4 +1,3 @@
-# /ai/assets/docs/tool_guides/jrc_design.md
 # Jira Connector (JRC) - Design Document
 
 **Version:** 0.1.0
