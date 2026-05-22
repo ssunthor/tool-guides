@@ -1,4 +1,3 @@
-# /ai/assets/docs/tool_guides/cfr_design.md
 ## RAG Confluence Retriever (CFR) - Design Document
 
 **Version:** 0.5

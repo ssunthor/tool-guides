@@ -1,4 +1,3 @@
-# /ai/assets/docs/tool_guides/nbc_design.md
 # NetBox Connector (NBC) - Design Document
 
 **Version:** 1.1
