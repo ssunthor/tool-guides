@@ -15,9 +15,9 @@ The **Legal Knowledge Base (LKB)** is a modular, AI-native contract intelligence
 To align with "Project CMDMeta" goals (automating the extraction of ~140 metadata properties) and ensure scalability for thousands of complex documents, the solution is decoupled into four independent applications:
 
 1.  **Legal Document Parser (LDP - Processor):** A heavy-duty, asynchronous conversion engine that transforms raw files (PDF, Image, DOCX, XLSX) into standardized Markdown using a queue-based worker architecture.
-2.  **Legal Knowledge Ingestor (LKI - Ingestor):** A semantic engine that processes Markdown into Vector Embeddings and executes batch LLM prompts to extract the "Static Answers" (Metadata) for the 140 required fields.
-3.  **Legal Contract Retriever (LCR - Retriever):** A hybrid search engine exposed via gRPC that seamlessly routes queries to PostgreSQL (for exact metadata matching) or ChromaDB (for semantic clause retrieval).
-4.  **Legal Knowledge Assistant (LKA - Assistant):** A user-facing web application (Split-Screen Dashboard) for browsing contracts, querying the database, verifying AI-extracted metadata, and handling "Human-in-the-Loop" (HITL) corrections and dynamic field generation.
+2.  **Legal Document Ingestor (LDI - Ingestor):** A semantic engine that processes Markdown into Vector Embeddings and executes batch LLM prompts to extract the "Static Answers" (Metadata) for the 140 required fields.
+3.  **Legal Document Retriever (LDR - Retriever):** A hybrid search engine exposed via gRPC that seamlessly routes queries to PostgreSQL (for exact metadata matching) or ChromaDB (for semantic clause retrieval).
+4.  **Legal Document Assistant (LDA - Assistant):** A user-facing web application (Split-Screen Dashboard) for browsing contracts, querying the database, verifying AI-extracted metadata, and handling "Human-in-the-Loop" (HITL) corrections and dynamic field generation.
 
 ---
 
@@ -31,11 +31,11 @@ This suite leverages the "Best of Breed" logic from existing SERA applications t
 | :--- | :--- | :--- |
 | **CAP (CV Processor)** | **Async Worker Pattern** (`core/worker.py`) | **Core of LDP.** Reuse the Redis/Celery architecture to handle bulk processing of heavy PDF files without blocking the API. |
 | **RMI (Remittance)** | **The Extraction Gauntlet** (`core/pipeline/a1_extraction`) | **Core of LDP.** Reuse the logic of trying sequential parsers (Layout -> OCR -> Native Text) until one succeeds. Added logic for `.docx` and `.xlsx` parsing. |
-| **CFI (Confluence)** | **HyDE Generator** (`core/qa_generator.py`) | **Core of LKI.** Critical for legal RAG. Generates questions like *"What are the termination conditions?"* to match clauses about *"Material Breach"*. |
-| **CFI (Confluence)** | **Map-Reduce Summarizer** (`core/llm_summarizer.py`) | **Core of LKI.** MSAs are token-heavy. We reuse the `_map_and_assemble_sections` logic for summaries. |
-| **CFI (Confluence)** | **Semantic Analyzer** (`core/llm_analyzer.py`) | **Core of LKI.** Refactored into `MetadataExtractor`. Iterates through the **140 CMD Metadata fields** during ingestion to extract specific answers to PostgreSQL. |
-| **CFR (Confluence Retriever)** | **Intent Routing & Reranking** | **Core of LCR.** Adapted for legal Hybrid Search (SQL vs. Vector) and NVIDIA NIM reranking. |
-| **CAP (CV Processor)** | **UI / UX Pattern** | **Core of LKA.** Reuse the Dashboard layout, Split-Screen (Document vs. Data), and "Confidence Badge" logic for metadata verification. |
+| **CFI (Confluence)** | **HyDE Generator** (`core/qa_generator.py`) | **Core of LDI.** Critical for legal RAG. Generates questions like *"What are the termination conditions?"* to match clauses about *"Material Breach"*. |
+| **CFI (Confluence)** | **Map-Reduce Summarizer** (`core/llm_summarizer.py`) | **Core of LDI.** MSAs are token-heavy. We reuse the `_map_and_assemble_sections` logic for summaries. |
+| **CFI (Confluence)** | **Semantic Analyzer** (`core/llm_analyzer.py`) | **Core of LDI.** Refactored into `MetadataExtractor`. Iterates through the **140 CMD Metadata fields** during ingestion to extract specific answers to PostgreSQL. |
+| **CFR (Confluence Retriever)** | **Intent Routing & Reranking** | **Core of LDR.** Adapted for legal Hybrid Search (SQL vs. Vector) and NVIDIA NIM reranking. |
+| **CAP (CV Processor)** | **UI / UX Pattern** | **Core of LDA.** Reuse the Dashboard layout, Split-Screen (Document vs. Data), and "Confidence Badge" logic for metadata verification. |
 | **Shared Lib** | `LLMInterface`, `Embedder`, `VdbWriter` | Moved to `ai/common_lib` and imported by all components. |
 
 ---
@@ -72,7 +72,7 @@ We have transitioned from legacy layout models to a purely vision-driven pipelin
 
 ---
 
-## 4. Application 2: Legal Knowledge Ingestor (LKI)
+## 4. Application 2: Legal Document Ingestor (LDI)
 
 **Category:** (I) Ingestor
 **Role:** The "Brain"
@@ -85,7 +85,7 @@ This is a **Dual-Mode** application (Incremental Sync & Standalone Task). It pic
 
 1.  **`FetchProcessedDocStep`**: Loads the Markdown from the LDP output directory.
 2.  **`SemanticChunkingStep` (Hybrid LLM + Deterministic Strategy)**:
-    * *Logic:* Instead of relying on fragile Markdown headers, the LKI assigns line numbers to the text and feeds it to an LLM (Gemma 4) using sliding overlapping windows. The LLM extracts semantic pointers (start/end lines, chunk types, TOC numbers). A deterministic Python structural merger then deduplicates the overlaps, stitches broken boundaries, and isolates tables.
+    * *Logic:* Instead of relying on fragile Markdown headers, the LDI assigns line numbers to the text and feeds it to an LLM (Gemma 4) using sliding overlapping windows. The LLM extracts semantic pointers (start/end lines, chunk types, TOC numbers). A deterministic Python structural merger then deduplicates the overlaps, stitches broken boundaries, and isolates tables.
 3.  **`MetadataExtractionStep` (The "140 Fields" Logic)**:
     * *Input:* Loads the 140 metadata definitions (Yes/No, Dates, Entities, Clause Checks) from the Database.
     * *Process:* Utilizing the massive local H100 compute cluster, it brute-forces prompt batches across the chunks to pre-compute the answers for all 140 fields.
@@ -102,26 +102,26 @@ This is a **Dual-Mode** application (Incremental Sync & Standalone Task). It pic
 
 ---
 
-## 5. Application 3: Legal Contract Retriever (LCR)
+## 5. Application 3: Legal Document Retriever (LDR)
 
 **Category:** (R) Retriever
 **Role:** The "Hybrid Search Engine"
 **Input:** Orchestrator Search Query (gRPC)
 **Output:** Structured JSON containing SQL metadata and/or Vector citations.
 
-The LCR is a dedicated gRPC service that acts as the bridge between the broader Orchestrator ecosystem and the Legal Knowledge Base. Because contract queries can be strictly factual ("What is the term?") or highly interpretive ("Summarize the liability limits"), the LCR uses a hybrid retrieval strategy.
+The LDR is a dedicated gRPC service that acts as the bridge between the broader Orchestrator ecosystem and the Legal Knowledge Base. Because contract queries can be strictly factual ("What is the term?") or highly interpretive ("Summarize the liability limits"), the LDR uses a hybrid retrieval strategy.
 
 ### 5.1 Query Intent Routing
 When passed a user query, a fast, small LLM (e.g., `gemma3:8b`) performs Intent Classification to route the search:
 
-1.  **Metadata/SQL Intent:** If the query maps to one of the 140 pre-extracted fields (e.g., "Show me all contracts with Auto-Renew"), the LCR translates the query into a PostgreSQL `SELECT` statement against the `contract_metadata` table.
-2.  **Semantic/Vector Intent:** If the query is open-ended or analytical (e.g., "How does the indemnification clause handle data breaches?"), the LCR converts the query to an embedding and searches ChromaDB.
-3.  **Hybrid Intent:** If the query requires both (e.g., "Summarize the SLA penalties for contracts expiring in 2026"), the LCR filters by date in SQL, then performs a vector search only on the chunks belonging to that filtered subset of documents.
+1.  **Metadata/SQL Intent:** If the query maps to one of the 140 pre-extracted fields (e.g., "Show me all contracts with Auto-Renew"), the LDR translates the query into a PostgreSQL `SELECT` statement against the `contract_metadata` table.
+2.  **Semantic/Vector Intent:** If the query is open-ended or analytical (e.g., "How does the indemnification clause handle data breaches?"), the LDR converts the query to an embedding and searches ChromaDB.
+3.  **Hybrid Intent:** If the query requires both (e.g., "Summarize the SLA penalties for contracts expiring in 2026"), the LDR filters by date in SQL, then performs a vector search only on the chunks belonging to that filtered subset of documents.
 
 ### 5.2 Context Formatting & Output
-To prevent hallucinations in downstream synthesis, the LCR returns a strictly formatted payload:
+To prevent hallucinations in downstream synthesis, the LDR returns a strictly formatted payload:
 * **SQL Hits:** Returned as clean key-value pairs representing the extracted fields.
-* **Vector Hits:** Returned with the exact `clause_text`, the `document_name`, and a `citation_link` (e.g., `#page=4&chunk_id=102`) so the LKA UI can automatically scroll the user to the source material.
+* **Vector Hits:** Returned with the exact `clause_text`, the `document_name`, and a `citation_link` (e.g., `#page=4&chunk_id=102`) so the LDA UI can automatically scroll the user to the source material.
 * **Reranking:** Vector results are passed through an NVIDIA NIM reranker to ensure only the highest-confidence clauses are returned.
 
 ---
@@ -160,7 +160,7 @@ Given that the core Parser (LDP) is largely complete and the Assistant (LDA) UI 
   * Built the active gRPC remote control allowing users to trigger `Reprocess` or `Cancel` commands directly to the LDP cluster.
   * Implemented the hybrid CMD Autocomplete to seamlessly map unassigned documents to the official corporate hierarchy.
 
-### Phase 3: Legal Knowledge Ingestor (LKI) - [IN PROGRESS]
+### Phase 3: Legal Document Ingestor (LDI) - [IN PROGRESS]
 * **Objective:** Build the semantic engine that bridges the gap between raw text and searchable vector/SQL databases, fulfilling the requirements of Project CMDMeta.
 * **Deliverables:**
   * **Semantic Chunking:** Develop a robust, fault-tolerant chunking strategy. Because relying on Markdown headers fails across decades of inconsistent legal formatting, the system uses an LLM with sliding windows to extract precise clause pointers, backed by Python logic to sanitize boundaries and stitch tables.
@@ -172,7 +172,7 @@ Given that the core Parser (LDP) is largely complete and the Assistant (LDA) UI 
       * **HyDE:** Generating synthetic questions for complex clauses.
   * **Vector Generation:** Generate embeddings for the chunks, summaries, and questions, storing them in the ChromaDB `legal_contracts` collections.
 
-### Phase 4: The Hybrid Retriever (LCR) - [PLANNED]
+### Phase 4: The Hybrid Retriever (LDR) - [PLANNED]
 * **Objective:** Enable complex, conversational Q&A against the contract repository with precise, clickable citations.
 * **Deliverables:**
   * Build the `gRPC` service that handles open-ended chat queries from the LDA UI.
@@ -213,5 +213,5 @@ Given that the core Parser (LDP) is largely complete and the Assistant (LDA) UI 
 * **Deliverables:**
   * **HITL Correction UI:** If the chatbot answers a question incorrectly (e.g., pulling the wrong termination clause), the user can browse the Split-Screen Document Explorer and flag the *correct* chunk that should have been retrieved.
   * **The Golden RAG Cache:** The system saves this interaction (the user's original query vector + the correct `chunk_id`) in a dedicated PostgreSQL table, strictly scoped to that specific CMD Client Group.
-  * **Self-Healing Retrieval:** Modify the Legal Contract Retriever (LCR) to check this cache first. If a future user asks a semantically similar question (passing a high fuzzy/vector similarity threshold against the cached query), the LCR will automatically force-inject the human-validated chunk into the LLM's context window, bypassing standard vector similarity failures.
+  * **Self-Healing Retrieval:** Modify the Legal Document Retriever (LDR) to check this cache first. If a future user asks a semantically similar question (passing a high fuzzy/vector similarity threshold against the cached query), the LDR will automatically force-inject the human-validated chunk into the LLM's context window, bypassing standard vector similarity failures.
   * **Result:** The RAG system becomes hyper-specialized and perfectly tuned to each specific customer's document quirks automatically over time.
