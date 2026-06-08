@@ -67,7 +67,7 @@ To solve the problem of RAG returning outdated terms from an MSA when an Amendme
 1. **Grouping:** Documents are strictly grouped by their `cmd_client_group_id`.
 2. **Chronology:** Documents within a group are sorted by `extracted_date`.
 3. **Knowledge Graph Triplet Extraction:** During ingestion of Amendments, the LLM extracts triplets that define overrides (e.g., `[Amendment 1] -> MODIFIES_CLAUSE -> [MSA Section 4.2]`). 
-4. **Vector Tagging:** Embeddings are tagged with a `temporal_weight` or `superseded_by` metadata flag to guide the Retriever (LCR) at search time.
+4. **Vector Tagging:** Embeddings are tagged with a `temporal_weight` or `superseded_by` metadata flag to guide the Retriever (LDR) at search time.
 
 ---
 
@@ -90,7 +90,7 @@ The LDI is driven by a `click` CLI (`ldi_cli.py`) with specialized command group
 ---
 
 ## 8. Continuous Learning & HITL RAG Feedback (Future Enhancement)
-To prevent the RAG system from repeatedly failing on the same ambiguous queries, the LDI and Retriever (LCR) will implement a **Human-In-The-Loop (HITL) Self-Healing Loop**. 
+To prevent the RAG system from repeatedly failing on the same ambiguous queries, the LDI and Retriever (LDR) will implement a **Human-In-The-Loop (HITL) Self-Healing Loop**. 
 
 Because vector similarity is not perfect, users interacting with the chatbot might receive an incomplete answer if the Retriever fetches the wrong chunk.
 
