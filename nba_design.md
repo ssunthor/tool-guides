@@ -2,7 +2,7 @@
 
 **Version:** 1.5.0
 **Date:** 2026-05-06
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Assistant (A)
 **Acronym:** NBA
 

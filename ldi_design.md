@@ -1,7 +1,8 @@
 # Legal Document Ingestor (LDI) - Design Document
 
-**Version:** 0.7.0
-**Date:** 2026-05-14
+**Version:** 0.0.7
+**Date:** 2026-06-03
+**Author:** Martin Kecka, Gemini AI
 **Category:** Ingestor (I)
 **Acronym:** LDI
 
@@ -46,18 +47,20 @@ This phase relies on an LLM to understand the logical flow of the contract witho
 * **Context Injection:** The document's Category is injected into the prompt to set the correct extraction schema.
 * **Sliding Windows:** The document is fed to the LLM (e.g., `gemma4-31b`) in overlapping batches (e.g., 400 lines with 100 lines of overlap).
 * **Pointer Output:** The LLM returns a strict JSON array of pointers (`start_line`, `end_line`, `chunk_type`, `toc_number`).
+* **Streaming vLLM Client:** To prevent reverse proxy 504 timeouts during massive context window processing, the internal `vLLMClient` uses an active HTTP streaming strategy (`stream: True`) to keep the connection alive while the LLM generates the dense JSON pointer arrays.
 * **Fallback Mechanisms:** If the primary "thinking" LLM fails to output valid JSON pointers after retries, the system automatically falls back to a faster, non-thinking model configuration to guarantee throughput.
 
 ### 4.3 Phase 3: Deterministic Structural Merging (The Safety Net) (`structural_merger.py`)
 Because sliding windows create overlapping JSON outputs and LLMs occasionally make mistakes, the LDI utilizes a "Defense in Depth" deterministic merger to cleanly resolve boundaries before saving to the database.
 * **Overlap Deduplication:** Overlapping pointers from the sliding windows are mathematically fused into continuous blocks.
-* **Advanced Table Stitching & Classification:** HTML/Markdown tables are frequently split across page breaks. The merger scans adjoining table chunks. If column counts match, or if a fragment is separated only by a stray OCR artifact (< 60 words), the merger safely stitches the `<tr>`/`<td>` tags back together, recalculating the `end_idx` and `page` metadata. Utilizing logic prototyped in `test_table.py`, it also classifies tables as either "Layout" (to be flattened) or "Data" (to be preserved).
+* **Advanced Table Stitching & Classification:** HTML/Markdown tables are frequently split across page breaks. The merger scans adjoining table chunks. If column counts match, or if a fragment is separated only by a stray OCR artifact (< 60 words), the merger safely stitches the `<tr>`/`<td>` tags back together, recalculating the `end_idx` and `page` metadata.
+* **Intelligent Table Classification (Heuristic vs. LLM):** Mathematically evaluates matrix density (e.g., average words per cell, clause numbering) to intelligently distinguish between layout tables and data tables. It utilizes a Gemma 4 "Judge" to validate edge cases, ensuring that formatting is preserved for legal data tables while completely flattened for layout grids.
 * **Boundary Sanitization:** Scans for and removes duplicated headers leaking across chunk boundaries (e.g., if "12. Liability" accidentally bled into the end of chunk 11 and the start of chunk 12).
 * **Orphan Catching (Gap Stitching):** The script scans for small line gaps (1-5 lines) between chunks and forces the preceding chunk to expand and absorb the orphaned text or orphaned headers.
 
 ### 4.4 Phase 4: Dynamic TOC & Hierarchy Building (`toc_builder.py`)
 If a contract lacks an explicit Table of Contents, the system builds a virtual one:
-* **Stack-Based Resolution:** Analyzes the assigned `toc_number` of each chunk (e.g., "9.1.2").
+* **Stack-Based Resolution:** Analyzes the assigned `toc_number` of each chunk (e.g., "9.1.2"), intelligently matching relative and absolute section numbers to accurately trace parent-child depth.
 * **Deterministic Parenting:** Pushes and pops hierarchy levels to figure out exactly where a clause fits, automatically generating `ancestor_titles_list` and prepending context to child chunks before they are embedded.
 
 ---
@@ -81,8 +84,8 @@ Following chunking, the pipeline triggers batch LLM prompts to enrich the databa
 
 ---
 
-## 7. CLI-Driven Development
-The LDI is driven by a `click` CLI (`ldi_cli.py`) with specialized command groups to facilitate local development and bulk operations:
+## 7. Orchestration & CLI-Driven Development
+The LDI is orchestrated using a lean, SERA-standardized `bootstrap_helper.py` to accelerate startup times, and is driven by a `click` CLI (`ldi_cli.py`) with specialized command groups to facilitate local development and bulk operations:
 * **Pipeline Commands (`ingest`, `run-task`):** Executes the main processing workflow or standalone tasks.
 * **Test Commands (`test-chunking`):** Allows rapid testing of the LLM Pointer extraction logic, outputting detailed analytics directly to JSON.
 * **Audit Commands (`audit-chunks`, `inspect-backlog`):** Includes a local-only "LLM-as-a-Judge" QA tool to automatically evaluate chunking quality during development, preventing the need to manually review thousands of JSON files.

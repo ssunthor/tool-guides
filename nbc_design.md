@@ -2,7 +2,7 @@
 
 **Version:** 1.1
 **Date:** 2025-08-21
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Connector (C)
 **Acronym:** NBC
 

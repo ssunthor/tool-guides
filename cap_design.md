@@ -2,7 +2,7 @@
 
 **Version:** 2.5.1
 **Date:** 2026-02-02
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Processor (P)
 **Acronym:** CAP
 

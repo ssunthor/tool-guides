@@ -2,7 +2,7 @@
 
 **Version:** 0.5.0
 **Date:** 2026-02-21
-**Author(s):** Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Ingestor (I)
 **Acronym:** BSI
 

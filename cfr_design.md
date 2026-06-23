@@ -2,7 +2,7 @@
 
 **Version:** 0.5
 **Date:** 2025-08-08
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Retriever (R)
 **Acronym:** CFR (ConFluence Retriever)
 

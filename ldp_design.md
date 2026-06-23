@@ -1,8 +1,8 @@
 # Legal Document Parser (LDP) - Design Document
 
-**Version:** 0.2.0
-**Date:** 2026-05-08
-**Author(s):** Martin Kecka, Gemini AI
+**Version:** 0.2.6
+**Date:** 2026-06-07
+**Author:** Martin Kecka & Gemini AI
 **Category:** Processor (P)
 **Acronym:** LDP
 
@@ -25,12 +25,14 @@ The LDP is built as a highly scalable, decoupled service designed to handle hund
 * `legal_document_parser.py`: The main entry point that bootstraps the environment and launches the CLI.
 * `cli/ldp_cli.py`: The `click`-based CLI managing database operations, pipeline testing, evaluation scripts, targeted repairs, and starting the gRPC server.
 * `grpc_api/server.py`: The external interface (`ldp.proto`) allowing the broader LKB Orchestrator to submit documents (`SubmitDocument`), check processing status (`GetJobStatus`), and manage job states (`ReprocessDocument`, `CancelDocument`, `ReprocessMetadata`).
+* `grpc_api/services.py`: The SERA Standard telemetry server (`SeraAppService`), enabling AMU observability by reporting deep health statuses for PostgreSQL and Redis.
 * `core/worker_celery.py`: The distributed task queue engine. It defines the master workflow (`process_document_master`), concurrent hybrid page processing (`process_hybrid_page_task`), and the massive stitching/finalization phase (`finalize_document`).
 * `core/orchestrator.py`: Handles initial job ingestion, saving files to the artifact directory, and queuing jobs into the pending database state for Celery Beat to dispatch.
 * `core/extraction/`: 
     * `hybrid_parser.py`: The core page processor implementing "Universal Interleaved Segmentation", routing content dynamically between native PyMuPDF extraction and Nanonets Vision OCR.
     * `nanonets_parser.py`: The primary engine for converting PDF crops to images and calling the Nanonets OCR2-3B model.
     * `gemma_extractor.py`: Manages the 4-pass LLM metadata extraction (Category, Detailed Category, Customer, Date) utilizing the Sandwich Method and logprob-based confidence scoring.
+    * `clause_extractor.py`: Safely extracts highly specific legal clauses (e.g., Price Renewal, Assignment) from parsed documents, mapping AI quotes to physical page bounds.
     * *Legacy Parsers*: Contains `fitz_parser.py`, `marker_parser.py`, and `surya_parser.py` (maintained for fallback or benchmarking purposes).
 * `core/repair/`:
     * `page_validator.py`: Executes the VLM-based "Audit & Repair" loop on individual pages using Gemma 4.
@@ -47,7 +49,7 @@ The LDP is built as a highly scalable, decoupled service designed to handle hund
 The LDP processes heavy legal PDFs using a scatter-gather (map-reduce) pattern managed by Celery, employing a multi-stage strategy that prioritizes accuracy and self-correction over raw speed.
 
 ### Step 1: Submission & Dispatch
-1. **Ingestion:** A document is submitted via the gRPC API or CLI. The `orchestrator` saves the raw PDF to the `input/` directory and creates a `DocumentJob` in PostgreSQL with a `pending` status.
+1. **Ingestion:** A document is submitted via the gRPC API or CLI. The system features robust SharePoint tree scanning, allowing users to crawl and batch-ingest from deep SharePoint directories (bypassing list view thresholds). The `orchestrator` saves the raw PDF to the `input/` directory, checks for SHA-256 hash duplicates, and creates a `DocumentJob` in PostgreSQL with a `pending` status.
 2. **Dispatch:** A Celery Beat task (`dispatch_pending_jobs`) polls the database. If the cluster has capacity (e.g., `< 3` active jobs), it assigns the pending job to a worker and updates the status to `processing`.
 
 ### Step 2: Universal Interleaved Segmentation (Scatter)
@@ -86,8 +88,9 @@ The pristine Markdown is passed to the LLM (`gemma-3-27b-it`) via the `gemma_ext
     * Extracts `detailed_category`.
     * Extracts `customer` and related fields (Contact Name, Email) using forced JSON mode. It explicitly ignores internal GTT/MegaPath entities via hardcoded blocking lists.
     * Extracts `date`.
-3. **Logprob Confidence Scoring:** The system captures the exact token log-probabilities to generate a mathematical confidence score (0-100%) for the customer extraction, automatically flagging low-confidence hits.
-4. **Fallback Healing:** If the model accidentally extracts an internal entity, the system automatically fires a `CUSTOMER_FALLBACK_PROMPT` to self-correct.
+3. **Targeted Clause Extraction:** A dedicated pass extracts highly specific legal clauses (e.g., Price Renewal, Assignment, Change of Control) storing them in the `document_clauses` table and mapping them accurately to their physical pages using sliding-window regex.
+4. **Logprob Confidence Scoring:** The system captures the exact token log-probabilities to generate a mathematical confidence score (0-100%) for the customer extraction, automatically flagging low-confidence hits.
+5. **Fallback Healing:** If the model accidentally extracts an internal entity, the system automatically fires a `CUSTOMER_FALLBACK_PROMPT` to self-correct.
 
 ### Step 7: CMD Resolution & Finalization
 1. **Entity Resolution:** The extracted customer email (or name) is fired against the `cmc_client` (via gRPC). It utilizes fuzzy matching to find the exact official CMD Client Group ID.
@@ -107,6 +110,8 @@ The pristine Markdown is passed to the LLM (`gemma-3-27b-it`) via the `gemma_ext
 * **Logprob Confidence Scoring:** Replaces subjective AI "confidence" with objective mathematical probability based on token generation likelihood, improving hit-rate visibility.
 * **Internal Entity Blocking:** Hardcoded logic ensures that internal service providers (e.g., GTT, MegaPath, Interoute) are never mistakenly identified as the client.
 * **Smart History Resolution:** If the LLM extracts an ambiguous name, the LDP checks the database history for the specific *Customer Contact Name* to disambiguate the company.
+* **Reprocess Failed Pages:** Users can bypass expensive LLM extraction for healthy pages and specifically re-target only the pages that failed the OCR/VLM audit, preserving topology and saving compute.
+* **SharePoint Ingestion & Deduplication:** Crawls deep SharePoint directories, bypassing list view thresholds, and actively prevents redundant downloads via SHA-256 hash checking.
 
 ---
 
@@ -114,10 +119,12 @@ The pristine Markdown is passed to the LLM (`gemma-3-27b-it`) via the `gemma_ext
 
 ### 5.1. PostgreSQL Database
 The `document_jobs` table acts as the source of truth for the processing lifecycle:
-* **Core Info:** `id` (UUID), `filename`, `status`, `review_status`.
+* **Core Info:** `id` (UUID), `filename`, `status`, `review_status`, `file_hash`, `source_types`, `source_details` (JSONB).
 * **Extracted Data:** `extracted_customer`, `extracted_category`, `extracted_date`, `extracted_email`.
 * **Resolution Data:** `cmd_client_group_name`, `cmd_client_id`.
 * **System Stats:** JSONB `stats` column, JSONB `audit` column (containing the page-by-page VLM evaluations), `extracted_confidence_score`, `error_message`.
+
+The `document_clauses` table tracks specific legal provisions linked to the `document_jobs`.
 
 ### 5.2. File System (Artifact Storage)
 * **Input Directory:** `/ai/legal_document_parser/input/` (Raw PDFs).
@@ -147,6 +154,13 @@ The LDP includes a powerful suite of CLI tools for local testing, evaluation, ta
 
 # Scan existing markdowns and repair artifact headers and TOC noise (Dry Run)
 ./legal_document_parser.py repair_headers
+
+# Crawl and ingest batch from SharePoint
+./legal_document_parser.py analyze-batch
+./legal_document_parser.py ingest-batch
+
+# Sequentially trigger targeted clause extraction
+./legal_document_parser.py extract-clauses
 
 # Apply header repairs directly to the files
 ./legal_document_parser.py repair_headers --commit

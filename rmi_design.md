@@ -2,7 +2,7 @@
 
 **Version:** 0.6.0
 **Date:** 2026-02-21
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Ingestor (I)
 **Acronym:** RMI
 

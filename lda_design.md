@@ -2,7 +2,7 @@
 
 **Version:** 0.2.3
 **Date:** 2026-06-08
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Assistant (A)
 **Acronym:** LDA
 

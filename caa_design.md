@@ -2,7 +2,7 @@
 
 **Version:** 2.2.8
 **Date:** 2026-02-21
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Assistant (A)
 **Acronym:** CAA
 

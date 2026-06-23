@@ -2,7 +2,7 @@
 
 **Version:** 0.1.0
 **Date:** 2026-05-04
-**Author(s):** Martin Kecka, Gemini AI
+**Author:** Martin Kecka & Gemini AI
 **Category:** Connector (C)
 **Acronym:** JRC
 
