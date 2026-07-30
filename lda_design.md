@@ -92,3 +92,7 @@ The `DocumentationPage` acts as a centralized knowledge base for the entire LKB 
 ### 6.2 Dynamic Field Generation (Self-Service)
 **Objective:** Allow business users to define new extraction fields without developer intervention.
 * **Implementation:** Add a configuration UI allowing users to define a new prompt and data type. The LDA backend will insert this into the database and fire a broadcast command to the LDP cluster to retroactively run the new extraction against the cached Markdown of all previously processed documents.
+
+### 6.3 AI Jurist Integration
+**Objective:** Create a dedicated AI Jurist agent within the LDA ecosystem.
+* **Implementation:** Introduce an advanced AI entity that can actively reason over extracted clauses and metadata, providing automated legal risk assessments and contract review summaries directly in the user interface.

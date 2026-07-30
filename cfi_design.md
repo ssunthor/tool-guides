@@ -55,7 +55,11 @@ This ingestor is a modular component crucial for populating the knowledge base u
 
 The application is structured into a main dispatcher, a pipeline orchestrator for incremental syncs, and a set of core modules responsible for specific logic.
 
-* `confluence_ingestor.py`: The main entry point and task dispatcher. It parses CLI arguments and decides whether to run the default incremental sync or a specific standalone task.
+* `confluence_ingestor.py`: The main entry point and task dispatcher. It wraps the `cfi_cli.py` Click group to handle routing.
+* `cli/`: Contains the modular command-line interface.
+    * `cfi_cli.py`: The root CLI group.
+    * `commands/sync_cmds.py`: Handles incremental and full sync operations (`sync all`, `sync space`, `sync page`).
+    * `commands/task_cmds.py`: Handles standalone bulk processing tasks (`task summaries`, `task hyde`, etc.).
 * `core/processor.py` (**ConfluenceProcessor**): The central orchestrator for the incremental sync pipeline. It executes a sequence of modular workflow steps for each page.
 * `core/workflow/`: This directory contains the modular, single-responsibility steps that form the incremental processing pipeline (e.g., `step_01_fetch_data.py`, `step_06_process_html_and_chunk.py`, etc.). These steps act as thin wrappers around the core logic modules.
 * **Core Logic Modules (`core/`):** These modules contain the primary business logic and are designed for dual-mode operation (supporting both incremental and standalone execution).
@@ -116,7 +120,7 @@ This mode is orchestrated by the `ConfluenceProcessor` and executes a linear pip
 
 This mode is triggered by the `--run-task` CLI argument and is dispatched by `confluence_ingestor.py`.
 
-1.  **Task Selection:** The user specifies a task to run (e.g., `summaries`, `hyde`, `embedding`).
+1.  **Task Selection:** The user specifies a task to run (e.g., `python confluence_ingestor.py task summaries`, `task hyde`, `task embedding`).
 2.  **Database Query:** The corresponding core module (e.g., `LLMSummarizer`) directly queries the PostgreSQL database. It uses the granular `last_*_at` timestamps to find all items that need processing.
 3.  **Bulk Processing:** The module processes the identified items in batches, generating the required enrichments and updating the results in the database.
 4.  **Timestamp Update:** Upon successful processing of an item, the corresponding timestamp (e.g., `last_embedded_at`) is updated.
@@ -130,32 +134,32 @@ These are post-processing or enrichment steps that can be run in bulk across the
 ### Hypothetical Question Generation (HyDE)
 
 * **Purpose:** To improve search relevance by generating and embedding hypothetical questions a user might ask.
-* **Trigger:** `--run-task hyde`
+* **Trigger:** `task hyde`
 
 ### Table Summarization
 
 * **Purpose:** To make tabular data accessible by generating natural-language summaries of tables.
-* **Trigger:** `--run-task tables`
+* **Trigger:** `task tables`
 
 ### LLM Semantic Analysis
 
 * **Purpose:** To enrich text chunks with structured metadata (e.g., `document_type`, `user_intent`) for advanced filtering and routing.
-* **Trigger:** `--run-task analysis`
+* **Trigger:** `task analysis`
 
 ### Vision Analysis
 
 * **Purpose:** To generate keywords and descriptions for all images in the asset store.
-* **Trigger:** `--run-task vision`
+* **Trigger:** `task vision`
 
 ### Embedding Generation
 
 * **Purpose:** To generate or regenerate vector embeddings for all chunks that need it.
-* **Trigger:** `--run-task embedding`
+* **Trigger:** `task embedding`
 
 ### Multi-Page Q&A Synthesis
 
 * **Purpose:** To create complex Q&A pairs that require synthesizing information from multiple, linked documents.
-* **Trigger:** `--run-task synthesis`
+* **Trigger:** `task synthesis`
 
 ---
 
@@ -233,32 +237,47 @@ A filesystem (e.g., a Kubernetes Persistent Volume Claim) for storing raw binary
 
 ## 8. Command-Line Interface (CLI) Usage
 
-The ingestor is run using `python confluence_ingestor.py [OPTIONS]`.
+The ingestor uses a modern, nested Click CLI structure triggered via `python confluence_ingestor.py [COMMAND]`. Global settings (like config path and log directory) are now statically loaded from `settings.yaml` to keep the CLI clean.
 
-### Incremental Sync Mode (Default)
+### Synchronization Operations
 
-* `--settings FILE_PATH`: Path to the `settings.yaml` file.
-* `--log-dir DIR_PATH`: Directory to store log files.
-* `--log-level LEVEL`: Console logging level (DEBUG, INFO, etc.).
-* `--space-key KEY`: Process only this specific space key.
-* `--page-id ID`: Process only this specific page ID.
-* `--force-reprocess`: Force reprocessing of all pages, ignoring change detection.
+Triggered via the `sync` command group.
+
+* `sync all`: Syncs all configured spaces in settings.yaml.
+* `sync space [SPACE_KEY]`: Syncs a specific space.
+* `sync page [SPACE_KEY] [PAGE_ID]`: Syncs a specific page inside a space.
+* `--force-reprocess`: (Option) Force reprocessing of all pages, ignoring change detection.
 
 [bash]
 # Run the standard incremental sync for the "SE" space.
-python confluence_ingestor.py --space-key SE
+python confluence_ingestor.py sync space SE
 [/bash]
 
 ### Standalone Task Mode
 
-* `--run-task [summaries|hyde|tables|analysis|vision|embedding|synthesis|post-run|verify]`: Run a specific bulk processing task.
+Triggered via the `task` command group for specific bulk processing tasks.
+
+* `task summaries`: Run the LLM Summaries generation task.
+* `task hyde`: Run the HyDE generation task.
+* `task tables`: Run the Table summarization task.
+* `task analysis`: Run the Semantic Analysis task.
+* `task vision`: Run the Image/Vision Processing task.
+* `task embedding`: Run the Vector Embedding task.
+* `task synthesis`: Run the Multi-page QA Synthesis task.
+* `task triplets`: Run the Knowledge Graph Triplets extraction task.
+* `task verify`: Run Data Integrity Verification task.
+* `task post-run`: Run post-run tasks (Deletion check & Category rebuild).
+
+**Task Options:**
+* `--space-key [KEY]`: Process only a specific space key.
+* `--page-id [ID]`: Process only a specific page ID.
 * `--force-regenerate`: Force regeneration for all items in the task.
 * `--limit INT`: Limit the number of items processed by the task.
 * `--cascade`: Automatically run downstream dependent tasks.
 
 [bash]
-# Run bulk HyDE question generation for all relevant content.
-python confluence_ingestor.py --run-task hyde
+# Run bulk HyDE question generation for all relevant content in the SE space.
+python confluence_ingestor.py task hyde --space-key SE
 [/bash]
 
 ---

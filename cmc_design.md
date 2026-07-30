@@ -167,3 +167,14 @@ Adhering to the SERA **Header-Based RBAC** standard (Section 6.6), the CMC must 
 ### 6.4. Enhance Client Lookup Resilience
 
 * **Contextual Client Disambiguation:** The current `get_client_by_email` logic returns multiple clients on a `DOMAIN_MATCH`. The future enhancement is to pass the resulting list and the original `payer_name` from an external source (like a BSI transaction) to the Orchestrator. The Orchestrator's reasoning LLM can then use the `gemma3:27b` model to perform a fuzzy name comparison against the candidate clients, making an **intelligent decision** on the best match before returning the final client ID.
+
+### 6.5. Smart Proxy Caching (Lazy-Loaded Tiered Sync)
+
+To support multiple AI applications (like the Legal Document Assistant and Collections Analysis Assistant) without causing bottlenecks on the slow CMD GraphQL API, the CMC will implement a **Smart Proxy Cache**.
+
+* **On-Demand (Lazy) Loading:** Instead of brute-forcing daily syncs of all customers, the CMC will fetch customer financial data (MRR, Open Balances, etc.) only when specifically requested by a downstream application via gRPC. 
+* **Tiered Background Refresh:** Once a customer is cached in the CMC's local Redis instance, a background loop will automatically keep it updated based on business value:
+  * **High-Value (>$10k MRR):** Refreshed every 24 hours.
+  * **Standard (<$10k MRR):** Refreshed weekly.
+  * **Inactive:** Manual or infrequent refresh.
+* **Single Source of Truth:** This prevents fragmented and duplicated worker logic across the SERA ecosystem, acting as a high-speed, unified data gateway for all financial primitives.
