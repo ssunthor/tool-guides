@@ -1,7 +1,7 @@
 # Cash Application Assistant (CAA) - Design Document
 
-**Version:** 2.2.8
-**Date:** 2026-02-21
+**Version:** 2.4.5
+**Date:** 2026-09-17
 **Author:** Martin Kecka & Gemini AI
 **Category:** Assistant (A)
 **Acronym:** CAA
@@ -53,6 +53,8 @@ The system provides a user interface for monitoring the status of each transacti
 * **LLM Service (AI Factory):** Served via `vLLMClient` (OpenAI-compatible) powered by Gemma-4-31B-it. Used by specific rules (e.g., `ApplyGlobalOrigAmtRule`, `MatchClientByOnBehalfOfRule`) and the feedback/resolution analysis feature.
 * **ORC (Oracle Connector):** gRPC connector used to sync receipt status, apply credit memos (`ApplyCreditMemo`), unapply credit memos, fetch live ERP data, and post receipts via SOAP Atomic requests (`CreateStandardReceipt` & `ApplyStandardReceipt`) followed by REST verification.
 * **User Interface:** A React SPA served by the FastAPI backend provides monitoring, the Oracle Reconciliation Workbench, manual rule configuration, and HITL resolution.
+* **AMU Observability:** Integrates the SERA gRPC standard `SeraAppService` for centralized Application Management Utility (AMU) health reporting (e.g., PostgreSQL, Redis metrics).
+* **Configuration:** Adheres to the SERA ecosystem `v1-universal` standard for the `settings.yaml` file, ensuring a unified configuration structure across the application (including database, services, and `llm_engines`).
 
 ---
 
@@ -158,6 +160,7 @@ The core logic resides in the `RuleEngine`, which executes rules in a specific o
         1.  **Strategy 1 (Structured):** Uses `BsiTransaction.extracted_invoice_numbers` (pre-parsed).
         2.  **Strategy 2 (Parsed):** Uses `InvoiceParserHelper` to parse `raw_bank_text` using BU-specific regex rules.
         * Queries `open_invoices` for found numbers (where balance != 0). Links the client if all invoices belong to a **single, unambiguous client group**. If linked, immediately stores the matched items into `applied_invoices` to optimize downstream processing.
+        * **Sticky Bank Template Bypass:** Intelligently checks if conflicting BSI-extracted invoices are already closed in the ERP. If so, it safely ignores the stale bank text and allows the system to rely on current RMI data.
     * **State Change:** Unique group -> `client_linked`. Ambiguous group -> `hitl_needed`. Failure -> `pending_client_fuzzy_link`.
 
 ---
@@ -456,10 +459,12 @@ The Cash Application Assistant utilizes a suite of robust background services an
     * **Credit Memo Segregation & Safety:** Isolates negative target amounts or explicit 'CR' prefixes into a distinct `credit_memo` receipt type (Status: `cm_pending`). Ensures they do not consume the main payment waterfall cash total. A strict safety gate drops self-referencing CM applications (e.g., applying CR123 to target invoice CR123) to prevent opaque Oracle errors.
     * **Credit Memo BAN Priority:** CM waterfall netting logic strictly prioritizes netting against positive invoices that share the *exact same Customer BAN* before evaluating remaining items. Exact allocation amounts are recorded explicitly inside the CM's `references` array during initial staging, replacing sibling guesswork during the final Oracle push.
     * **Underpayment, Ghost Receipts, & Bank Fees:** Uses a strict waterfall logic prioritizing explicitly selected invoices. If funds run out, unpaid invoices generate "Ghost Receipts" (Status: `underpayment`, Prefix: `DEFICIT_`). If a positive cash remainder perfectly matches a BSI `charges_amount`, it auto-stages the remainder as a 'Bank Fee Offset'. Implicit bank fees and short payments apply a consistent `DEFICIT_FEE_` prefix to non-cash fee deductions, ensuring these rows are excluded from ledger cash sums while maintaining proper ERP offsets. Explicit bank fees (`charges_amount`) are prioritized over internal calculations to stage cross-currency fees perfectly.
+    * **SWIFT/ISO Charge Bearer Logic:** Fee generation deterministically relies on the SWIFT/ISO `charges_bearer` field (`OUR`, `SHA`, `BEN`) from the BSI to automatically decide whether to stage additive cash-consuming `FEE_` receipts or non-cash `DEFICIT_FEE_` offsets.
     * **Historical Lookups:** For transactions matched to already-paid invoices (`STATUS_APPLIED_CLOSED_INVOICE`), the service queries the live ERP to retrieve the *actual* historical Oracle Receipt Number that originally closed the invoice, embedding this in the UI.
 * **Bi-Directional Sync Protocol & Safety Gates:**
     * Executes a **SOAP Atomic** request (`CreateStandardReceipt`) to post fully applied receipts directly to invoices. The orchestrator explicitly drops `AmountReceiptCurrency` and `ExchangeRate` payload fields when passing a 1.0 normalized rate for same-currency transactions to prevent Oracle API rejections.
     * Immediately issues a **REST verification** fetch (`GetStandardReceipts`) to retrieve the generated `StandardReceiptId`, `CreationDate`, and confirmation `State`, syncing the local staging record.
+    * **Global Prefix Blocks:** The Oracle push engine enforces strict security blocks that automatically intercept and reject any attempt to post receipts containing the `DEFICIT_` or `CLOSED_` prefixes, protecting the ERP from data corruption. Dummy staging records for already paid invoices explicitly use the `CLOSED_` prefix to allow safe manual split/re-allocation.
     * **Smart Batch Posting Safety Gate:** During bulk posting, the system intelligently evaluates variance at the *individual transaction level* rather than locking the entire account batch. Mismatched transactions are dynamically disabled and flagged in the Post Batch dialog.
     * **Smart Unapplied Routing:** Intelligently detects if a receipt has zero invoice targets (e.g., Overpayments) and automatically routes the API push to the 'Unapplied / On Account' ERP workflow. The backend API correctly inherits the exact BAN from sibling invoices within the same bank transaction.
 
@@ -479,6 +484,7 @@ The Cash Application Assistant utilizes a suite of robust background services an
         * **Currency Validation:** Fails the invoice if the open item currency differs from the RMI payment currency.
         * **Closed Invoice Check:** If the invoice is found but has a 0 balance or is marked `CLOSED`, it flags it as `Matched (Closed)`.
         * **Amount Matching:** Checks if the RMI paid amount perfectly matches the `balance` (within 0.01 tolerance) -> `Matched (Balance)`. If not, checks the `original_amount` -> `Matched (Orig Amt)`.
+        * **Global Yield Safeguard (Amount Fallback Hijacking):** The local amount fallback matching expands its exact match search scope to the entire `client_group` and implements a 'Global Yield Safeguard' to verify global uniqueness before falling back to heuristics.
         * **Ambiguity Handling (Oldest First):** If the RMI amount matches *multiple* local invoices by original amount (and the balances are not exact matches), it sorts the candidates by `due_date` then `posting_date` (ascending) and applies the payment to the oldest open debt.
         * Fails the item (`Amount Mismatch`) if the invoice is found but neither balance nor original amount matches.
 
@@ -670,6 +676,11 @@ The CAA UI is built with React, Vite, and Material UI, featuring a robust Servic
 ### 9.1 Functional Roadmap
 * **Direct Posting Mode:** Implement a "Fast Track" configuration that allows high-confidence matches (e.g., 100% Exact Match on Invoice & Amount) to bypass the Oracle Staging Queue and post directly to ERP, further reducing manual review volume.
 * **Archive Function:** Once Oracle is fully processed we should "archive" all related items from our database
+* **Unapplied Receipt Recovery Flow:** Create a new dedicated UI flow for the specific scenario where a receipt header is successfully created in Oracle (leaving it unapplied) but the invoice application fails. Implementation details:
+  * **Dedicated Status:** Add a new staging status `hitl_unapplied` to `OracleReceiptStatusChip.jsx` with a distinct warning style to differentiate it from standard unapplied receipts.
+  * **"Apply to Invoices" or "Mark as OK" Action:** Conditionally render action buttons in `OracleReceiptActions.jsx` when the status is `hitl_unapplied`, allowing operators to either retry invoice application or mark the receipt as OK (leaving it unapplied intentionally) without recreating the header.
+  * **Backend Wiring:** Update the ORC Connector to return `partial_success=True` and the `StandardReceiptId` when application fails. Expose a new CAA endpoint (e.g., `POST /oracle/apply-invoices`) that bypasses header creation and explicitly calls the `ApplyStandardReceipt` gRPC wrapper.
+* **Regenerate ID Preservation:** Once the Unapplied Receipt Recovery flow is built and the Oracle connector is made idempotent, update the 'Regenerate' and 'Reprocess' logic to safely preserve and reuse existing Oracle receipt IDs rather than generating new ones. (Currently kept as "new ID generation" to intentionally avoid deadlock crashes).
 
 ### 9.2 Documentation & AI Context Optimization
 * **Glossary of Concepts:** Create a strict definition list distinguishing *BSI Payer*, *CMD Client*, and *Oracle Customer* to prevent LLM hallucinations during feedback analysis.

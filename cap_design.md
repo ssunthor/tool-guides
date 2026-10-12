@@ -536,3 +536,11 @@ Replace the single `cap-worker` service with two specialized services:
 * **Requirements:**
     * **Accuracy Testing:** Rigorous benchmarking is required to ensure the Nanonets model matches or exceeds the high extraction quality currently provided by `marker`.
     * **Integration:** Development of a new `vLLMClient` or specialized client to handle binary file uploads to the inference endpoint.
+
+### 8.8. "High Potential" / "Worth a Chance" Identification
+* **Status:** **IDEA / EXPLORATION**
+* **Problem:** The current alignment model strictly evaluates candidates against the explicit hard criteria and demands of the role. This causes highly capable, credible, and fast-rising junior candidates to be scored as a `0.0` fit for senior roles due to missing specific stack experience (e.g., a high-trajectory Junior DevOps applying for a Senior Network Engineer role).
+* **Proposed Solution:** Introduce a new flagging mechanism outside of the core `alignment_score` to identify "high potential" candidates.
+* **Implementation Strategy:**
+    1.  **Analyze Trajectory vs Alignment:** If a candidate has a `0.0` final score due to `alignment`, but possesses a very high `credibility_score` (e.g., > 8.0) and a `trajectory_category` of "Fast-Track Potential" or "Standard Progression".
+    2.  **"Worth a Chance" Flag:** Add a new boolean flag `is_high_potential` to the `AnalysisResult` model. This flag does NOT override the `0.0` final score for the specific requisition but allows the candidate to be routed to a "Junior Talent Pool" or "Rising Star" pipeline for recruiters to review for other roles.
