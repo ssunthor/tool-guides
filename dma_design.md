@@ -1,4 +1,3 @@
-# /ai/assets/docs/tool_guides/eas_design.md
 ## DocuMind Assistant (DMA) - Design Document
 
 **Version:** 0.1  
