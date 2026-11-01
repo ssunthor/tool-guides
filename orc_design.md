@@ -4,8 +4,8 @@
 **Category:** (C) Connector
 **Name:** Oracle Connector
 **Acronym:** ORC
-**Version:** 1.2.3
-**Date:** 2026-10-23
+**Version:** 1.2.5
+**Date:** 2026-10-30
 **Author:** Martin Kecka & Gemini AI
 **Status:** Active
 
@@ -15,7 +15,7 @@
 
 The **Oracle Connector (ORC)** is a mission-critical, hybrid integration microservice within the SERA/GIA enterprise AI ecosystem. It serves as the authoritative, protocol-agnostic integration gateway between downstream SERA automation systems—most prominently the **Cash Application Assistant (CAA)** and **Cash Management Connector (CMC)**—and **Oracle Cloud ERP** (Oracle Fusion Cloud Financials, Accounts Receivable, and Cash Management).
 
-Global enterprise ERP systems present a notoriously fragmented integration landscape. Oracle Fusion Cloud divides its capabilities across two disparate protocol domains: modern, lightweight **REST APIs** (designed for high-throughput transactional queries and creation of business objects such as Invoices and Standard Receipts) and legacy, heavyweight **SOAP Web Services** secured via WS-Security (required for complex transactional operations such as receipt applications, credit memo balance applications, write-offs, and BI Publisher batch reporting). 
+Global enterprise ERP systems present a notoriously fragmented integration landscape. Oracle Fusion Cloud divides its capabilities across two disparate protocol domains: modern, lightweight **REST APIs** (designed for high-throughput transactional queries and creation of business objects such as Invoices and Standard Receipts) and legacy, heavyweight **SOAP Web Services** secured via WS-Security (required for complex transactional operations such as receipt applications, credit memo balance applications, write-offs, BI Publisher batch reporting, and Oracle Analytics reporting). 
 
 ORC abstracts this fundamental ERP dichotomy behind a unified, high-performance **gRPC interface** (`oracle_connector.OracleConnectorService`) on port `50054`. AI agents and downstream orchestration microservices never interact with raw Oracle REST JSON schemas, XML payloads, or WS-Security SOAP headers directly; ORC acts as an intelligent protocol router, schema translator, and data normalizer.
 
@@ -24,7 +24,8 @@ Its primary functional pillars include:
 - **Automated Cross-BU Inter-Company (IC) Bridging:** Detects Oracle cross-business-unit and cross-currency settlement constraints during payment application, dynamically executing write-offs on the source receipt against Inter-Company clearing accounts and orchestrating child receipts in the target business unit.
 - **"Search Light, Fetch Heavy" Discovery Engine:** Overcomes severe Oracle REST query limitations (such as the inability to filter parent receipts by child invoice remittance references) via an indexed customer account pagination algorithm that scans lightweight payloads before performing targeted deep-fetches.
 - **Smart Credit Memo Analysis & Lifecycle:** Evaluates BI Publisher credit memo application histories, performing mathematical net balance reconciliations and categorizing application linkages into operational states (`ACTIVE`, `HISTORY`, `CONTRIBUTING`) to enable automated credit memo applications and unapplications.
-- **Dynamic ERP Introspection & Cataloging:** Built-in discovery tooling (`RestCatalogInspector` and `wsdl_inspector`) that crawls Oracle FSCM REST Catalogs (`/describe`) and SOAP WSDLs, generating local schemas and human-readable documentation without requiring manual ERP portal exploration.
+- **Analytics & BI Publisher Execution Engine:** Executes BI Publisher batch reporting (`PublicReportService`) and Oracle Analytics Web Services (`saw.dll`), implementing a custom 3-phase session lifecycle (Logon via `nQSessionService`, Execute Query via `xmlViewService`, Logoff) and HTTP Authorization header suppression to bypass Oracle Cloud Web Application Firewall (WAF) 403 restrictions.
+- **Dynamic ERP Introspection & Cataloging:** Built-in discovery tooling (`RestCatalogInspector` and `wsdl_inspector`) that crawls Oracle FSCM REST Catalogs (`/describe`) and SOAP WSDLs, generating local schemas and human-readable documentation without requiring manual ERP portal exploration, alongside recursive BI Publisher catalog hierarchy browsing via SOAP.
 - **Global ERP Safety Guardrails:** Defense-in-depth validation intercepting and rejecting invalid synthetic placeholder payloads (such as `CLOSED_` receipt prefixes) before they can reach and compromise Oracle accounting ledgers.
 
 ---
@@ -36,7 +37,8 @@ ORC is engineered as a headless, modular Python service composed of client commu
 ### 2.1. Core Architectural Principles & Touchpoints
 
 - **Protocol Agnosticism for Consumers:** Downstream callers (CAA, CMC, GIA Orchestrator) interact solely via compiled Protobuf contracts (`orc.proto`). The underlying complexity of whether Oracle requires REST, SOAP, XML, or multi-step coordination is encapsulated entirely inside ORC.
-- **Dynamic Dual-Environment Routing:** ORC maintains simultaneous client connection pools for both **Oracle PROD** (`oracle_prod`) and **Oracle TEST** (`oracle_test`). Incoming gRPC requests specify a `business_unit`; ORC dynamically evaluates this against `oracle_erp.prod_business_units` in `config/settings.yaml` (with optional bank account overrides in `test_bank_accounts_override`), ensuring that production traffic and test simulation traffic remain strictly partitioned without requiring server restarts.
+- **Dynamic Dual-Environment Routing & Multi-Environment Targeting:** ORC maintains simultaneous client connection pools for both **Oracle PROD** (`oracle_prod`) and **Oracle TEST** (`oracle_test`), and additionally supports the **Oracle DEV-TEST** (`oracle_dev_test`) environment. Incoming gRPC requests specify a `business_unit`; ORC dynamically evaluates this against `oracle_erp.prod_business_units` in `config/settings.yaml` (with optional bank account overrides in `test_bank_accounts_override`), ensuring that production traffic and test simulation traffic remain strictly partitioned without requiring server restarts. At the CLI level, commands support dynamic environment targeting via the `--env [test|prod|dev_test]` option (default: `prod`) and the convenient `--test` boolean shortcut flag.
+- **Config Fallback Compatibility:** To accommodate both universal v1 and legacy configurations, ORC's gRPC server and CLI stub lookups seamlessly resolve service binding settings from `system_services.grpc` with fallback compatibility to the legacy `grpc_server` configuration block.
 - **Deterministic Financial Execution:** ORC performs zero non-deterministic or probabilistic operations. All payload generation, balance calculations, currency conversions, and SOAP envelope constructions follow deterministic business rules.
 - **Cash Application Assistant (CAA):** Primary operational consumer. CAA invokes ORC to retrieve open invoices by Billing Account Number (BAN), query receipt statuses, create unapplied receipts, create standard receipts, apply receipts to invoices, and execute credit memo applications/unapplications.
 - **Application Management Utility (AMU):** SERA ecosystem supervisor. Interacts with ORC's standard gRPC service (`SeraAppService`) on port `50054` to poll health matrix dependencies, systemd status (`orc-grpc.service`), and version telemetry from `CHANGELOG.yaml`.
@@ -67,7 +69,7 @@ graph TD
 
         ROUTER["Dynamic Environment Router<br/>(_get_env_clients: BU & Account Match)"]
 
-        subgraph Client_Pools ["Client Pools (PROD & TEST)"]
+        subgraph Client_Pools ["Client Pools (PROD, TEST, DEV-TEST)"]
             REST_CLI["OracleRestClient<br/>(fscmRestApi v11.13.18.05)"]
             SOAP_CLI["OracleSoapClient<br/>(Zeep + WS-Security Timestamp)"]
         end
@@ -88,6 +90,7 @@ graph TD
         SOAP_BIP["PublicReportService SOAP<br/>(/xmlpserver/services/PublicReportService)"]
         SOAP_AR["StandardReceiptService SOAP<br/>(/fscmService/StandardReceiptService)"]
         SOAP_CM["CreditMemoService SOAP<br/>(/fscmService/CreditMemoService)"]
+        SOAP_ANALYTICS["Analytics Web Services SOAP<br/>(/analytics-ws/saw.dll)"]
     end
 
     CAA -->|Create / Apply / Query Receipts| DOMAIN_SRV
@@ -108,6 +111,7 @@ graph TD
     SOAP_CLI -->|WS-Security UsernameToken| SOAP_BIP
     SOAP_CLI -->|WS-Security UsernameToken| SOAP_AR
     SOAP_CLI -->|WS-Security UsernameToken| SOAP_CM
+    SOAP_CLI -->|WAF Bypass Session Flow| SOAP_ANALYTICS
 
     SOAP_BIP -->|Base64 XML Blob| XML_PARSER
     XML_PARSER -->|MT940 Text| MT940_PARSER
@@ -128,7 +132,7 @@ An exhaustive structural breakdown of the `/ai/oracle_connector` repository scop
 │   ├── bank_accounts.json                          # Cached Oracle master bank accounts mapping (filtered by report_processors)
 │   └── bank_stmt_*.mt940                           # Cached MT940 statement extracts from BI Publisher for offline validation
 ├── cli/                                            # Command-line interface definitions and command sub-groups
-│   └── orc_cli.py                                  # Click CLI master module; implements discover, master-data, receipts, invoices, credit-memos, reports, and module commands
+│   └── orc_cli.py                                  # Click CLI master module; implements discover, master-data, receipts, invoices, credit-memos, reports (run, run-analytics, browse, bank-statements), and module commands
 ├── config/                                         # Central application configuration
 │   └── settings.yaml                               # Ecosystem v1-universal configuration (Oracle PROD/TEST endpoints, credentials, BU routing, gRPC settings)
 ├── core/                                           # Core communication clients, inspection tools, and processing engines
@@ -138,7 +142,7 @@ An exhaustive structural breakdown of the `/ai/oracle_connector` repository scop
 │   ├── report_processors.py                        # Post-processing filters for master data reports (filtering inactive BUs, dummy banks, and POBO accounts)
 │   ├── rest_client.py                              # OracleRestClient; handles JSON Basic Auth interactions, resource inspection, and "Search Light, Fetch Heavy" loops
 │   ├── rest_inspector.py                           # RestCatalogInspector; downloads and indexes Oracle FSCM/HCM/CRM REST Catalogs (/describe)
-│   ├── soap_client.py                              # OracleSoapClient; wraps Zeep with UsernameTokenWithTimestamp for BI Publisher, AR Receipts, and Credit Memos
+│   ├── soap_client.py                              # OracleSoapClient; wraps Zeep with WS-Security for BI Publisher, AR Receipts, Credit Memos, and custom session-based Analytics reports
 │   └── wsdl_inspector.py                           # Inspects SOAP WSDL files and generates human-readable capability reports
 ├── discovery/                                      # Local cache of introspected Oracle API definitions and WSDL schemas
 │   ├── oracle_fscm_v11.13.18.02.json               # Full downloaded Oracle FSCM REST API catalog schema
@@ -382,10 +386,17 @@ sequenceDiagram
    - **`ApplyCreditMemo`:** Resolves `CustomerTransactionId` for both CM and Invoice via REST, then calls `soap_client.apply_credit_memo_by_ids()` invoking `CreditMemoService.processApplyOnAccountCreditMemo`.
    - **`UnapplyCreditMemo`:** Calls `soap_client.unapply_credit_memo()` with `ReceivableApplicationId` and reversal date, invoking `CreditMemoService.processUnapplyOnAccountCreditMemo`.
 
-### 4.7. Workflow F: BI Publisher Report Execution & Catalog Browsing
+### 4.7. Workflow F: BI Publisher & Analytics Report Execution, Catalog Browsing
 
-1. **Generic Report Execution (`reports run` CLI / `run_generic_report`):** Constructs a SOAP XML envelope targeting `PublicReportService` (`/xmlpserver/services/PublicReportService`). Decodes Base64 `<reportBytes>` into raw UTF-8/Latin-1 strings and passes them to `OracleXMLParser` for tabular formatting.
-2. **Catalog Browsing (`reports browse` CLI / `browse_catalog`):** Invokes `PublicReportService.getFolderContents` via SOAP, recursively indexing Oracle BI catalog hierarchies (`/Custom/...`) up to a specified depth and formatting them into structured lists or JSON exports.
+1. **Generic BI Publisher Execution (`reports run` CLI / `run_generic_report`):** Constructs a SOAP XML envelope targeting `PublicReportService` (`/xmlpserver/services/PublicReportService`). Decodes Base64 `<reportBytes>` into raw UTF-8/Latin-1 strings and passes them to `OracleXMLParser` for tabular formatting.
+2. **Oracle Analytics Report Execution with Session-Based WAF Bypass (`reports run-analytics` CLI / `run_analytics_report`):**
+   Executes analytical queries against Oracle Analytics Web Services (`/analytics-ws/saw.dll?WSDL`). To prevent Oracle Cloud Web Application Firewall (WAF) 403 Forbidden rejections, ORC executes a custom 3-phase session lifecycle with endpoint separation and HTTP Authorization header suppression:
+   - **Phase 1: Session Logon (`#logon`):** Posts to the Session Service handler (`?SoapImpl=nQSessionService`) with user credentials, intentionally omitting the HTTP `Authorization` header so gateway security rules do not flag the request. Dynamically extracts `sessionID` from the XML response.
+   - **Phase 2: Query Execution (`#executeXMLQuery`):** Posts the report query to the XML View Service handler (`?SoapImpl=xmlViewService`), passing the `sessionID`, escaped `reportPath`, output format `SAWRowsetSchemaAndData`, and `maxRowsPerPage` pagination threshold.
+   - **Phase 3: Session Logoff (`#logoff`):** Dispatches `#logoff` to `?SoapImpl=nQSessionService` using the active `sessionID` to cleanly invalidate the session on Oracle servers and release resources.
+3. **Catalog Browsing (`reports browse` CLI / `browse_catalog`):**
+   - Invokes SOAP `PublicReportService.getFolderContents` with technical credentials.
+   - Supports recursive catalog indexing (`-r` / `--recursive`) defaulting to `/` (Shared Folders) or specific paths, traversing child folders and formatting the catalog structure into clean tabular console output (`TYPE | NAME` with tree indentation).
 
 ---
 
@@ -400,8 +411,8 @@ Every inbound gRPC request must specify a `business_unit` (and optionally a `rem
 - **BU Production Membership:** If `business_unit` exists in `oracle_erp.prod_business_units`, routes to **PROD**.
 - **Default Fallback:** If `business_unit` is missing or not in `prod_business_units`, logs a warning and safely defaults to **TEST**.
 
-Currently configured Production Business Units (`27` active units):
-`DK125BU`, `SE123BU`, `BG131BU`, `CH67BU`, `RO76BU`, `BE129BU`, `AT68BU`, `CZ57BU`, `GB01ABU`, `NL59BU`, `DE22BU`, `FR112BU`, `IT61BU`, `TR155BU`, `FI127BU`, `NL72BU`, `HK139BU`, `ES60BU`, `US06BU`, `IE38BU`, `US07BU`, `HU78BU`, `NO75BU`, `CA53BU`, `IN35BU`, `NL54BU`, `SG149BU`.
+Currently configured Production Business Units (`29` active units):
+`DK125BU`, `SE123BU`, `BG131BU`, `CH67BU`, `RO76BU`, `BE129BU`, `AT68BU`, `CZ57BU`, `GB01ABU`, `NL59BU`, `DE22BU`, `FR112BU`, `IT61BU`, `TR155BU`, `FI127BU`, `NL72BU`, `HK139BU`, `ES60BU`, `US06BU`, `IE38BU`, `US07BU`, `HU78BU`, `NO75BU`, `CA53BU`, `IN35BU`, `NL54BU`, `AU148BU`, `MX86BU`, `SG149BU`.
 
 ### 5.2. Global ERP Safety Guardrail for 'CLOSED_' Placeholders
 
@@ -585,11 +596,11 @@ ORC is a headless backend integration service. User-facing receipt matching view
 
 ### 11.1. CLI Command Reference
 
-All CLI commands are executed via `./oracle_connector.py <command>`. **All commands accept the global `--test` flag to target Oracle TEST instead of PROD.**
+All CLI commands are executed via `./oracle_connector.py <command>`. **All commands accept the global `--env [test|prod|dev_test]` option (default: `prod`) to target specific Oracle Cloud environments, as well as the `--test` boolean shortcut flag (equivalent to `--env test`).**
 
 | Command | Arguments & Options | Operational Description |
 | :--- | :--- | :--- |
-| **`start-grpc-server`** | *None* | Automatically verifies/generates Protobuf stubs and starts the dual gRPC daemon on the configured `system_services.grpc` host and port. |
+| **`start-grpc-server`** | *None* | Automatically verifies/generates Protobuf stubs and starts the dual gRPC daemon on the configured `system_services.grpc` (or `grpc_server`) host and port. |
 | **`clean`** | `--force` (flag) | Cleans and resets temporary `discovery/` and `cache/` workspace directories without interactive confirmation. |
 | **`discover init`** | `--api [fscm\|hcm\|crm]` (default: fscm) | Downloads WSDLs and REST catalog JSON, generating capability summaries in `discovery/`. |
 | **`discover list`** | *None* | Lists all cached Oracle REST resources from the downloaded catalog. |
@@ -608,8 +619,9 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 | **`credit-memos apply`** | `--cm <str>` (required)<br/>`--inv <str>` (required)<br/>`--amount <float>` (required)<br/>`--date <str>` (optional, YYYY-MM-DD) | Resolves CustomerTransactionIds and applies credit memo balance to an invoice via SOAP. |
 | **`credit-memos unapply`** | `--cm <str>` (required)<br/>`--inv <str>` (required)<br/>`--date <str>` (optional, YYYY-MM-DD) | Scans the BI Publisher report to dynamically resolve the `ReceivableApplicationId`, then unapplies the linkage via SOAP. |
 | **`reports run`** | `<report_path>` (argument)<br/>`-o` / `--output <file>` (optional) | Executes arbitrary BI Publisher report via SOAP `PublicReportService` and saves the raw XML payload to disk. |
+| **`reports run-analytics`** | `<report_path>` (argument)<br/>`--max-rows <int>` (default: 1000)<br/>`-o` / `--output <file>` (optional) | Executes Oracle Analytics report via SOAP with custom session-based WAF bypass (`nQSessionService` / `xmlViewService`), saving raw XML. |
 | **`reports bank-statements`** | `--start-date <str>` (required)<br/>`--end-date <str>` (required)<br/>`--account <str>` (required)<br/>`-o` / `--output <file>` (optional) | Runs BI Publisher bank statement report and exports raw MT940 data to disk. |
-| **`reports browse`** | `[folder_path]` (argument, default: `/`)<br/>`-r` / `--recursive` (flag) | Browses BI Publisher catalog folder contents via SOAP API. |
+| **`reports browse`** | `[folder_path]` (argument, default: `/`)<br/>`-r` / `--recursive` (flag) | Recursively browses BI Publisher catalog folder contents via SOAP API (`PublicReportService.getFolderContents`), rendering hierarchical tabular output. |
 | **`module info`** | `--grpc` (flag) | Queries local `SeraAppService` via gRPC to display module metadata and downstream dependencies. |
 | **`module check-health`** | `--grpc` (flag) | Queries local `SeraAppService` via gRPC to execute deep connectivity health checks against Oracle ERP endpoints. |
 
@@ -627,6 +639,10 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 ./oracle_connector.py module check-health
 ./oracle_connector.py module check-health --grpc
 ./oracle_connector.py module info --grpc
+
+# Dynamic environment targeting (--env test, --env dev_test, or shortcut --test)
+./oracle_connector.py --test module check-health
+./oracle_connector.py --env dev_test receipts list --limit 5
 
 # Clean temporary discovery and cache artifacts without prompt
 ./oracle_connector.py clean --force
@@ -683,10 +699,14 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 # Run arbitrary BI Publisher report and save raw XML
 ./oracle_connector.py reports run "/Custom/Financials/Cash Management/GTT Bank Accounts Report.xdo" -o "cache/accounts.xml"
 
+# Run Oracle Analytics report with session-based WAF bypass
+./oracle_connector.py reports run-analytics "/shared/Custom/Financials/AR Reconciliation" --max-rows 500
+
 # Extract MT940 bank statement report for an account and date range
 ./oracle_connector.py reports bank-statements --start-date "2026-10-01" --end-date "2026-10-20" --account "600888692019"
 
 # Browse BI Publisher catalog folders recursively via SOAP
+./oracle_connector.py reports browse / -r
 ./oracle_connector.py reports browse "/Custom/Financials" -r
 ```
 
@@ -699,12 +719,12 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 | Configuration Key | Type | Default / Configured Value | Purpose |
 | :--- | :--- | :--- | :--- |
 | `module_info.name` | `str` | `"Oracle Connector"` | Human-readable module name reported to AMU. |
-| `module_info.version` | `str` | `"1.2.3"` | Module version (dynamically resolved from `docs/CHANGELOG.yaml`). |
+| `module_info.version` | `str` | `"1.2.5"` | Module version (dynamically resolved from `docs/CHANGELOG.yaml`). |
 | `module_info.category` | `str` | `"Connector"` | SERA architectural category. |
 | `module_info.acronym` | `str` | `"ORC"` | 3-letter module identifier. |
 | `system_services.grpc.service_name` | `str` | `"orc-grpc.service"` | Systemd unit name checked by `GetAppInfo` / `GetDeepHealth`. |
-| `system_services.grpc.host` | `str` | `"0.0.0.0"` | Bind address for inbound ORC gRPC server. |
-| `system_services.grpc.port` | `int` | `50054` | Listening port for `OracleConnectorService` and `SeraAppService`. |
+| `system_services.grpc.host` | `str` | `"0.0.0.0"` | Bind address for inbound ORC gRPC server (fallback to `grpc_server.host`). |
+| `system_services.grpc.port` | `int` | `50054` | Listening port for `OracleConnectorService` and `SeraAppService` (fallback to `grpc_server.port`). |
 | `system_services.grpc.max_workers` | `int` | `10` | Thread pool worker count for gRPC server. |
 | `oracle_erp.prod_business_units` | `list[str]` | `[DK125BU, SE123BU, ...]` | List of Business Units routed to Oracle Production (all others default to TEST). |
 | `oracle_erp.test_bank_accounts_override` | `list[str]` | `[]` (optional) | Specific bank accounts routed unconditionally to TEST regardless of BU. |
@@ -715,8 +735,10 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 | `external_services.oracle_prod.bank_statement.report_path` | `str` | `"/Custom/Financials/Cash Management/GTT Bank Statement Report.xdo"` | Path to GTT Bank Statement BI Publisher report. |
 | `external_services.oracle_prod.ar_receipt.wsdl_path` | `str` | `"/fscmService/StandardReceiptService?WSDL"` | Accounts Receivable Standard Receipt SOAP WSDL path. |
 | `external_services.oracle_prod.create_apply_receipt.wsdl_path` | `str` | `"/fscmService/CreateAndApplyReceiptService?WSDL"` | Combined Create & Apply Receipt SOAP WSDL path. |
+| `external_services.oracle_prod.analytics_ws.wsdl_path` | `str` | `"/analytics-ws/saw.dll?WSDL"` | Oracle Analytics Web Services SOAP WSDL path. |
 | `external_services.oracle_test.url` | `str` | `"https://eckv-test.fa.us2.oraclecloud.com:443"` | Base URL for Oracle Cloud Test. |
 | `external_services.oracle_test.username` | `str` | `"Sera-AI"` | Technical service account for Oracle Test. |
+| `external_services.oracle_test.analytics_ws.wsdl_path` | `str` | `"/analytics-ws/saw.dll?WSDL"` | Oracle Analytics Web Services SOAP WSDL path (TEST). |
 | `external_services.oracle_dev_test.url` | `str` | `"https://eckvdev-test.fa.us2.oraclecloud.com/"` | Base URL for Oracle Cloud Dev-Test environment. |
 | `external_services.oracle_dev_test.username` | `str` | `"Sera-AI"` | Technical service account for Dev-Test. |
 | `paths.wsdl_cache_dir` | `str` | `"discovery"` | Directory storing downloaded SOAP WSDLs and summaries. |
@@ -733,14 +755,15 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 
 #### Configured Production Business Units (`oracle_erp.prod_business_units`)
 
-Currently 27 active production business units:
-`DK125BU`, `SE123BU`, `BG131BU`, `CH67BU`, `RO76BU`, `BE129BU`, `AT68BU`, `CZ57BU`, `GB01ABU`, `NL59BU`, `DE22BU`, `FR112BU`, `IT61BU`, `TR155BU`, `FI127BU`, `NL72BU`, `HK139BU`, `ES60BU`, `US06BU`, `IE38BU`, `US07BU`, `HU78BU`, `NO75BU`, `CA53BU`, `IN35BU`, `NL54BU`, `SG149BU`.
+Currently 29 active production business units:
+`DK125BU`, `SE123BU`, `BG131BU`, `CH67BU`, `RO76BU`, `BE129BU`, `AT68BU`, `CZ57BU`, `GB01ABU`, `NL59BU`, `DE22BU`, `FR112BU`, `IT61BU`, `TR155BU`, `FI127BU`, `NL72BU`, `HK139BU`, `ES60BU`, `US06BU`, `IE38BU`, `US07BU`, `HU78BU`, `NO75BU`, `CA53BU`, `IN35BU`, `NL54BU`, `AU148BU`, `MX86BU`, `SG149BU`.
 
 ### 12.2. Security & Authentication Architecture
 
 - **WS-Security Timestamp Skew Compensation:** Oracle SOAP services strictly reject timestamps outside acceptable skew. `UsernameTokenWithTimestamp` injects `Created` at `now - 5 minutes` and `Expires` at `now + 10 minutes`.
 - **Transport Security:** All communication with Oracle Cloud ERP occurs over TLS (`HTTPS:443`).
 - **Global ERP Safety Guardrail:** Rejects any receipt number containing the `CLOSED_` prefix before dispatching requests to Oracle, preventing synthetic CAA placeholder leaks from corrupting ERP ledgers.
+- **Oracle Analytics Session Authentication & WAF Bypass:** Queries against Oracle Analytics Web Services (`saw.dll`) bypass Oracle Cloud WAF rules by omitting HTTP `Authorization` headers during transport, managing dynamic sessions (`#logon` and `#logoff`) via `nQSessionService`, and executing XML queries through `xmlViewService`.
 - **RPC Transaction Auditing:** Mutating operations (`CreateStandardReceipt`, `CreateUnappliedReceipt`, `ApplyCreditMemo`, `UnapplyCreditMemo`, `ApplyStandardReceipt`) record structured request/response JSON payloads in `/ai/assets/logs/orc_connector/transactions/` with sliding-window retention.
 
 ### 12.3. Hardware Affinity & Execution Boundaries
@@ -760,6 +783,7 @@ Currently 27 active production business units:
 6. **SOAP Fault XML Noise Stripping (`_parse_soap_error`):** Oracle SOAP operations return verbose XML faults enveloped in `<MESSAGE>` elements with cluttered internal database exception call-stacks (`ARP_PROCESS_APPLICATION`, `CM_APPLICATIONORA`, `ORA-20001`, `FND_GENERIC_MULTI_MESSAGE`). ORC strips this noise via regular expressions, deduplicates error fragments, and returns only clean, human-readable `<TEXT>` content so downstream assistants receive actionable financial errors.
 7. **Post-Application UI Remittance Reference Binding:** Because Oracle SOAP `createApplyReceipt` writes to the accounting ledger without writing to the REST `remittanceReferences` child collection, ORC executes an immediate secondary REST call (`add_remittance_reference`) to bind the remittance reference to the receipt, ensuring full operational visibility in the Oracle Cloud ERP Web UI and REST queries.
 8. **Multi-Currency Realized Gain/Loss Variance Handling:** For cross-currency applications, ORC dynamically computes the FX conversion factor (`ReferenceAmount / MetaInvoiceAmount`) and passes `ApplyClosedInvoices = 'Y'` to SOAP `createApplyReceipt`, allowing Oracle AR to calculate and post realized exchange rate gains/losses without manual reconciliation.
+9. **Oracle Analytics WAF 403 Bypass Resilience:** When querying Oracle Analytics Web Services (`saw.dll`), Oracle Cloud WAF inspects inbound requests and blocks standard basic auth payloads. ORC isolates session management to `?SoapImpl=nQSessionService` and query execution to `?SoapImpl=xmlViewService`, while suppressing the HTTP `Authorization` header. Furthermore, session logoff is unconditionally dispatched in a `try...finally` lifecycle to prevent session exhaustion on Oracle servers.
 
 ---
 
