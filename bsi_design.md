@@ -4,8 +4,8 @@
 **Category:** (I) Ingestor
 **Name:** Bank Statement Ingestor
 **Acronym:** BSI
-**Version:** 0.2.8
-**Date:** 2026-10-23
+**Version:** 0.2.9
+**Date:** 2026-10-26
 **Author:** Martin Kecka & Gemini AI
 **Status:** Active
 
@@ -13,7 +13,7 @@
 
 ## 1. Introduction & Purpose 📜
 
-The **Bank Statement Ingestor (BSI)** is a foundational ingestion microservice within the SERA/GIA enterprise AI ecosystem. It is the authoritative single source of truth for all incoming bank cash transactions and daily bank account ledger balances across European, North American, and Latin American banking operations.
+The **Bank Statement Ingestor (BSI)** is a foundational ingestion microservice within the SERA/GIA enterprise AI ecosystem. It is the authoritative single source of truth for all incoming bank cash transactions and daily bank account ledger balances across European, North American, Latin American, and Asia-Pacific banking operations.
 
 Operating as an automated, multi-protocol ingestion and enrichment pipeline, BSI addresses a core operational challenge in financial automation: global financial institutions transmit statement files in archaic, proprietary, and structurally disparate formats—ranging from SWIFT MT940 messages and ANSI BAI2 cash management files to custom Excel XLSX workbooks and online banking portal CSV exports. BSI continuously discovers, ingests, sniffs, normalizes, enriches, and persists these statements into a standardized PostgreSQL relational schema.
 
@@ -22,7 +22,7 @@ The data processed and persisted by BSI serves as the primary prerequisite for t
 Its primary functional pillars include:
 - **Multi-Protocol Statement Ingestion:** Continuous background polling of remote SFTP dropboxes with dynamic rush-hour intervals, high-throughput gRPC upload endpoints for programmatic ingestion, and developer CLI tooling for local batch processing.
 - **Deterministic Bank Format Sniffing:** Automated detection of bank origin and format based on byte-level content signatures, structural markers, and dynamic database account routing (`_detect_bank_from_file`).
-- **Multi-Format Dialect Parsing:** Native parsers for SWIFT MT940 (Deutsche Bank, Danske Bank, Itaú Unibanco, UBB Bank, JSC OTP Bank), ANSI BAI2 (Bank of America US and EMEA), Excel XLSX workbooks, and structured CSV exports.
+- **Multi-Format Dialect Parsing:** Native parsers for SWIFT MT940 (Deutsche Bank, Danske Bank, Itaú Unibanco, UBB Bank, JSC OTP Bank), ANSI BAI2 (Bank of America US, EMEA, and APAC), Excel XLSX workbooks, and structured CSV exports.
 - **Intelligent Lockbox & Addenda Explosion:** Reconciles Bank of America BAI2 summary transactions against raw `.dat` lockbox, ACH, and wire addenda files (`BofaEnricher`), exploding batch summaries into granular check line items with check numbers, payer names, and remittance metadata while strictly isolating regional lockboxes (e.g., Canadian Lockbox `919150`).
 - **Scope-Aware Invoice Extraction Engine:** Multi-tier regular expression engine (`InvoiceParserHelper`) that queries live database rules scoped to specific Business Units to extract invoice and credit memo numbers from unstructured narrative text with OCR error repair.
 - **Central Validation & Noise Pruning:** Connects via gRPC to the Cash Management Connector (CMC) to validate candidate invoice numbers against the central financial database (`invoice_validator.py`), eliminating spurious noise (telephone numbers, postal codes, routing references) and reverse-enriching missing payer names from client account metadata.
@@ -67,7 +67,7 @@ graph TD
         subgraph Parsers ["Converters & Parsers"]
             CONV_DB["Deutsche MT940 / CSV"]
             CONV_DANSKE["Danske MT940"]
-            CONV_BOFA["BofA BAI2 (US / EMEA)"]
+            CONV_BOFA["BofA BAI2 (US / EMEA / APAC)"]
             CONV_XLSX["BofA US/EMEA XLSX"]
             CONV_INTL["Itaú / UBB / JSC OTP MT940"]
         end
@@ -155,6 +155,7 @@ An exhaustive structural breakdown of the `/ai/bank_statement_ingestor` reposito
 │   │   └── sftp_connector.py                       # Paramiko-based client for listing, downloading, and connecting to remote bank SFTP
 │   ├── constants.py                                # Transaction code dictionaries (BAI2 codes, MT940 maps, Deutsche and Danske constants)
 │   ├── converters/                                 # Bank statement structure converters (orchestrator parse_statement interface)
+│   │   ├── bank_of_america_apac_converter.py      # Bank of America APAC BAI2 converter (Sydney Branch AUD/EUR/USD)
 │   │   ├── bank_of_america_emea_converter.py      # Bank of America EMEA BAI2 converter
 │   │   ├── bank_of_america_us_converter.py        # Bank of America US BAI2 converter
 │   │   ├── bank_of_america_us_xlsx_converter.py   # Bank of America US/EMEA custom Excel XLSX converter with run date extraction
@@ -177,8 +178,9 @@ An exhaustive structural breakdown of the `/ai/bank_statement_ingestor` reposito
 │   │   └── sql_writer.py                           # Statement persistence, smart merge, orphan deletion, and bsi_ingestion_audit logging
 │   ├── orchestrator.py                             # Central pipeline orchestrator; maintains PARSER_REGISTRY and routes file execution
 │   ├── parsers/                                    # Low-level syntax parsers extracting raw statement fragments
+│   │   ├── bofa_apac_parser.py                     # Specialized APAC BAI2 dialect parser inheriting BofA International/EMEA tag extraction
 │   │   ├── bofa_bai2_parser.py                     # Base BAI2 state machine parser (records 01, 02, 03, 16, 49, 88, 98, 99)
-│   │   ├── bofa_emea_parser.py                     # Specialized EMEA BAI2 dialect parser extracting /REF- and UK Sort Codes
+│   │   ├── bofa_emea_parser.py                     # Specialized EMEA BAI2 dialect parser extracting /REF-, UK Sort Codes, and FX RATE-terminated OBI
 │   │   ├── bofa_us_parser.py                       # Specialized US BAI2 dialect parser handling Wire, ISO/SEPA, ACH, and EMEA text layouts
 │   │   ├── bofa_us_xlsx_parser.py                  # Pandas-based parser for "Previous Day All Data Summary and Detail with Text Report" XLSX
 │   │   ├── danske_mt940_parser.py                  # Danske Bank MT940 parser with :28C: sheet aggregation and multi-language :86: parsing
@@ -305,7 +307,7 @@ stateDiagram-v2
 3. **Conditional Addenda Sync:** If the detected profile is `bank_of_america_us` or `bank_of_america_us_xlsx`, connects to SFTP and syncs the last 7 days of `.dat` addenda files into the file's directory (`_sync_bofa_addenda`).
 4. **Parse & Dynamic Filename Standardization:** Executes `converter.parse_statement(local_file_path)` to extract account data and the earliest statement date (or `file_run_date_utc` for BofA XLSX). To prevent portal export filename collisions (e.g., `BSDB (18).txt`) from overwriting files in the vault:
    - **Deutsche Bank (`deutsche_bank`, `deutsche_bank_csv`):** Adds `+1 day` to the statement date (aligning with portal export conventions) and renames the file to `DB_MT940_{YYYYMMDD}_{HHMMSS}{ext}` or `DB_CSV_{YYYYMMDD}_{HHMMSS}{ext}`.
-   - **Bank of America (`bank_of_america_*`):** Renames to `{bofa_us|bofa_emea}_{first_account}_{YYYYMMDD}_{HHMMSS}{ext}`.
+   - **Bank of America (`bank_of_america_*`):** Renames to `{bofa_us|bofa_emea|bofa_apac}_{first_account}_{YYYYMMDD}_{HHMMSS}{ext}`.
    - **Other Banks:** Preserves `original_filename`.
 5. **Vault Archiving:** Copies the renamed file and any `.dat` addenda into `{vault_dir}/{canonical_name}/{YYYY}/{MM}/`.
 6. **Database Write & Duplicate Protection:** Calls `sql_writer.save_statement_data(..., force_update=override)`. For gRPC uploads, `override` is strictly `False`. If all account/date combinations in the file already exist in `bsi_statement_files`, `save_statement_data` returns `[]`, and `process_manual_upload` rejects the upload with `"DUPLICATE_FILE: All accounts in this statement have already been processed for this date."`
@@ -344,7 +346,7 @@ BSI is a fully automated, headless ingestor; **interactive Human-in-the-Loop (HI
 When a file is uploaded manually or via gRPC, BSI determines its `parser_id` using the following priority order:
 1. **Binary / Text Header Inspection (Non-Excel files, first 8,192 bytes, UTF-8 with UTF-16 null-byte fallback):**
    - **Deutsche Bank CSV (`deutsche_bank_csv`):** Contains `"Account Currency"`, `"GVC"`, and `"HVP - "`.
-   - **Bank of America BAI2 (`bank_of_america_emea` / `bank_of_america_us`):** Starts with `01,` and contains `,2,`. Routes to `bank_of_america_emea` if `"emea"` is in the lowercase filename, otherwise `bank_of_america_us`.
+   - **Bank of America BAI2 (`bank_of_america_apac` / `bank_of_america_emea` / `bank_of_america_us`):** Starts with `01,` and contains `,2,`. Routes to `bank_of_america_apac` if `"apac"` is in the lowercase filename, `bank_of_america_emea` if `"emea"` is in the lowercase filename, otherwise `bank_of_america_us`.
    - **MT940 Variants:** Identified by `{1:F`, `\n:20:`, `\r:20:`, or starting with `:20:`. Routed by BIC substring: `"DEUT"` -> `deutsche_bank`; `"DABA"` or `"DANSKE"` -> `danske_bank`; `"ITAU"` -> `itau_unibanco`; `"UBBS"` -> `ubb_bank`; `"OTPV"` -> `jsc_otp_bank`.
 2. **Configured Filename Regex Match:** Tests `os.path.basename(file_path)` against each profile's `filename_pattern` in `settings.yaml`.
 3. **Excel Content & Database Institution Routing (`.xlsx`, `.xls`):**
@@ -363,6 +365,7 @@ When a file is uploaded manually or via gRPC, BSI determines its `parser_id` usi
 | **Danske Bank A/S** | `danske_bank_converter.py`<br/>`danske_mt940_parser.py` | SWIFT MT940 | `abs(open + credits - debits - close) < 0.01` |
 | **Bank of America (US)** | `bank_of_america_us_converter.py`<br/>`bofa_us_parser.py` / `bofa_us_xlsx_parser.py` | ANSI BAI2 / XLSX | Record 03 / Record 49 Reconciled (`diff == 0`) |
 | **Bank of America (EMEA)** | `bank_of_america_emea_converter.py`<br/>`bofa_emea_parser.py` | ANSI BAI2 | Record 03 / Record 49 Reconciled (`diff == 0`) |
+| **Bank of America (APAC)** | `bank_of_america_apac_converter.py`<br/>`bofa_apac_parser.py` | ANSI BAI2 | Record 03 / Record 49 Reconciled (`diff == 0`) |
 | **Itaú Unibanco S.A.** | `itau_bank_converter.py`<br/>`itau_mt940_parser.py` | SWIFT MT940 | `diff < 0.05` (Checking + Investment combined) |
 | **United Bulgarian Bank (UBB)** | `ubb_bank_converter.py`<br/>`ubb_mt940_parser.py` | SWIFT MT940 | `diff < 0.05` (Per-block integrity) |
 | **JSC OTP Bank** | `jsc_otp_bank_converter.py`<br/>`jsc_otp_mt940_parser.py` | SWIFT MT940 | `diff < 0.05` (Default currency RUB) |
@@ -406,13 +409,13 @@ When a file is uploaded manually or via gRPC, BSI determines its `parser_id` usi
   4. **EMEA-style:** `ORG=`, `BNF=`, `OBI=`, `/REF-`.
 - **Deducted Fees & FX:** Extracts `FEES: $X DEDUCTED` (setting `charges_bearer = 'BEN'` and reconstructing `original_amount = amount + fee`) and `FX: CUR AMT RATE`.
 
-##### 5. Bank of America EMEA BAI2 (`BofaEmeaParser` & `bank_of_america_emea_converter`)
-- **Inheritance:** Extends the BAI2 state machine from `BofaBai2Parser`.
+##### 5. Bank of America EMEA & APAC BAI2 (`BofaEmeaParser`, `BofaApacParser`, `bank_of_america_emea_converter`, `bank_of_america_apac_converter`)
+- **Inheritance:** `BofaEmeaParser` extends the BAI2 state machine from `BofaBai2Parser`; `BofaApacParser` subclasses `BofaEmeaParser` to process international APAC feeds (`^gttcommu_APAC_PDR_\d+\.txt$`, e.g., Sydney Branch `BOFAAUSX` across `AUD`, `EUR`, and `USD`).
 - **Field Extraction:**
   - Extracts `/REF-` as `bank_reference`.
   - Parses `ORG=` ordering party blocks: strips leading `1/`, extracts `3/` as address, and matches trailing `(\d{6})\s+(\d{8})$` as UK Sort Code & Account Number.
-  - Extracts exchange rate and instructed amounts from `FX RATE CUR/ AMT RATE`.
-  - Extracts `OBI=` remittance purpose, capturing `/RFB/` as `end_to_end_reference`.
+  - Extracts exchange rate and instructed amounts from `FX RATE ([A-Z]{3})/\s+([\d,.]+)\s+([\d,.]+)`.
+  - Extracts `OBI=` remittance purpose via `r'OBI=(.*?)(?=\s+FX RATE|$)'` (explicitly terminating prior to inline `FX RATE` blocks to prevent exchange rate details from corrupting `remittance_purpose`), capturing `/RFB/` as `end_to_end_reference`.
 
 ##### 6. Itaú Unibanco MT940 (`ItauMT940Parser` & `itau_bank_converter`)
 - **Message Splitting & Investment Aggregation:** Splits on `$` and `(?=\{1:F)`. Strips `AA+` automatic investment suffix from `:25:` account numbers. Aggregates Checking and Investment blocks for the same `(account, date, currency)` by **summing** both `opening_balance` and `closing_balance` and recalculating integrity (`diff < 0.05`).
@@ -537,6 +540,7 @@ To ensure standard reporting and audit clarity across downstream modules:
    - `BOFAIE3X`: Bank of America Europe DAC, Dublin Branch
    - `BOFAIN4X`: Bank of America N.A., India Branch
    - `BOFANLNX`: Bank of America Europe DAC, Amsterdam Branch
+   - `BOFAAUSX`: Bank of America N.A., Sydney Branch
    - `DABADKKK`: Danske Bank A/S
    - `DABASESX`: Danske Bank A/S, Sweden Branch
 3. Caches resolved branch names in `BankBranchHelper._cache` (`threading.Lock()`) for zero-latency retrieval during statement conversion.
@@ -754,38 +758,23 @@ All CLI commands are executed via `./bank_statement_ingestor.py <command>`.
 
 ### 12.1. Configuration Reference (`config/settings.yaml`)
 
-| Configuration Key | Type | Default / Configured Value | Purpose |
-| :--- | :--- | :--- | :--- |
-| `module_info.name` | `str` | `"Bank Statement Ingestor"` | Human-readable module name reported to AMU. |
-| `module_info.version` | `str` | `"0.2.8"` | Module version (overridden dynamically by `docs/CHANGELOG.yaml` in `SeraStandardServiceImpl`). |
-| `module_info.category` | `str` | `"Ingestor"` | SERA architectural category. |
-| `module_info.acronym` | `str` | `"BSI"` | 3-letter module identifier. |
-| `system_services.grpc.service_name` | `str` | `"bsi-grpc.service"` | Systemd unit name checked by `GetAppInfo` / `GetDeepHealth`. |
-| `system_services.grpc.host` | `str` | `"0.0.0.0"` | Bind address for the inbound BSI gRPC server. |
-| `system_services.grpc.port` | `int` | `50052` | Listening port for `BankStatementIngestorService` and `SeraAppService`. |
-| `system_services.grpc.max_workers` | `int` | `4` | Thread pool worker count for the gRPC server. |
-| `system_services.poller.service_name` | `str` | `"bsi-poller.service"` | Systemd unit name for the SFTP background poller. |
-| `database.write_dsn` | `str` | `"postgresql://ai_assistant_user:***@localhost:5432/caa_assistant_db"` | SQLAlchemy PostgreSQL connection string. |
-| `connectors.cmc.host` | `str` | `"localhost"` | Target hostname for the CMD Connector (CMC) gRPC service. |
-| `connectors.cmc.port` | `int` | `50053` | Target port for the CMD Connector (CMC) gRPC service. |
-| `external_services.oracle_sftp.host` | `str` | `"10.150.22.55"` | SFTP server hostname for bank statements and addenda. |
-| `external_services.oracle_sftp.port` | `int` | `22` | SFTP server SSH port. |
-| `external_services.oracle_sftp.username` | `str` | `"sera-ai-on-prem"` | SFTP service account username. |
-| `external_services.oracle_sftp.key_path` | `str` | `"/root/keys/sftp/sera_ai_sftp_key"` | Path to the private RSA SSH key for SFTP authentication. |
-| `paths.local_input_dir` | `str` | `"/ai/bank_statement_ingestor/input"` | Local batch directory scanned by `process_local_directory`. |
-| `paths.temp_files_dir` | `str` | `"/ai/assets/tmp/bank_statement_ingestor"` | Transient directory for SFTP downloads and gRPC uploads. |
-| `paths.vault_dir` | `str` | `"/ai/assets/vault/bank_statement_ingestor"` | Permanent date-partitioned archive for raw statements and `.dat` addenda. |
-| `paths.cmc_generated_stubs_path` | `str` | `"/ai/assets/protos/cmd_connector/generated"` | Directory containing compiled `cmc_service_pb2` gRPC stubs. |
-| `paths.sera_proto_source_dir` | `str` | `"/ai/assets/protos/sera_standard"` | Directory containing `sera_standard.proto`. |
-| `paths.generated_stubs_path` | `str` | `"/ai/assets/protos/bank_statement_ingestor/generated"` | Output directory for compiled `bsi_pb2` and `sera_standard_pb2` stubs. |
-| `paths.dev_tests_dir` | `str` | `"/ai/bank_statement_ingestor/tests"` | Root directory for `dev` and `analysis` CLI test data and reports. |
-| `logging.level` | `str` | `"INFO"` | Console logging threshold (`bsi_app.log` always logs at `DEBUG`). |
-| `logging.log_dir` | `str` | `"/ai/assets/logs/bsi_ingestor"` | Output directory for rotating log files. |
-| `poller.enabled` | `bool` | `true` | Master toggle for the SFTP poller configuration block. |
-| `poller.interval_seconds` | `int` | `1800` | Off-peak polling interval in seconds (30 minutes). |
-| `poller.rush_interval_seconds` | `int` | `300` | Peak-hour polling interval in seconds (5 minutes). |
-| `poller.rush_hour_start` | `str` | `"06:30"` | UTC start time (`HH:MM`) for high-frequency polling. |
-| `poller.rush_hour_end` | `str` | `"12:30"` | UTC end time (`HH:MM`) for high-frequency polling. |
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
+| Configuration Key | Default / Configured Value | Purpose |
+| :--- | :--- | :--- |
+| `system_services.grpc` | `"bsi-grpc.service"` (`0.0.0.0:50052`, `4` workers) | Systemd unit, bind address/port, and worker count for `BankStatementIngestorService` and `SeraAppService`. |
+| `system_services.poller` | `"bsi-poller.service"` | Systemd unit name for the SFTP background poller daemon. |
+| `database.write_dsn` | `"postgresql://ai_assistant_user:***@localhost:5432/caa_assistant_db"` | SQLAlchemy PostgreSQL connection string. |
+| `connectors.cmc` | `"localhost:50053"` | Target hostname and port for the CMD Connector (CMC) gRPC service. |
+| `external_services.oracle_sftp` | `"sera-ai-on-prem@10.150.22.55:22"` (key: `"/root/keys/sftp/sera_ai_sftp_key"`) | SFTP server host, port, username, and RSA private key path for bank statements and addenda. |
+| `paths.local_input_dir` | `"/ai/bank_statement_ingestor/input"` | Local batch directory scanned by `process_local_directory`. |
+| `paths.temp_files_dir` | `"/ai/assets/tmp/bank_statement_ingestor"` | Transient directory for SFTP downloads and gRPC uploads. |
+| `paths.vault_dir` | `"/ai/assets/vault/bank_statement_ingestor"` | Permanent date-partitioned archive for raw statements and `.dat` addenda. |
+| `paths.dev_tests_dir` | `"/ai/bank_statement_ingestor/tests"` | Root directory for `dev` and `analysis` CLI test data and reports. |
+| `poller.enabled` | `true` | Master toggle for the SFTP poller configuration block. |
+| `poller.interval_seconds` | `1800` | Off-peak polling interval in seconds (30 minutes). |
+| `poller.rush_interval_seconds` | `300` | Peak-hour polling interval in seconds (5 minutes). |
+| `poller.rush_hour_start` / `end` | `"06:30"` / `"12:30"` | UTC start and end window (`HH:MM`) for high-frequency polling. |
 
 #### Configured Bank Profiles (`bank_profiles`)
 
@@ -796,6 +785,7 @@ All CLI commands are executed via `./bank_statement_ingestor.py <command>`.
 | **`bank_of_america_us`** | `true` | `bank_of_america_us` | `db_gttsftp/production/BankStatements/archive2/boa` | `bofa/production` | `^gtt_commu_pd_\d+\.txt$` |
 | **`bank_of_america_us_xlsx`** | `true` | `bank_of_america_us_xlsx` | *None (Manual/Portal)* | *None* | `.*\.xlsx$` |
 | **`bank_of_america_emea`** | `true` | `bank_of_america_emea` | `db_gttsftp/production/BankStatements/archive2/boa` | *None* | `^gttcommu_EMEA_PDR_\d+\.txt$` |
+| **`bank_of_america_apac`** | `true` | `bank_of_america_apac` | `db_gttsftp/production/BankStatements/archive2/boa` | *None* | `^gttcommu_APAC_PDR_\d+\.txt$` |
 | **`itau_unibanco`** | `true` | `itau_unibanco` | `db_gttsftp/production/BankStatements/archive2/accesspay/itau` | *None* | `^\d{12}ITAUMT940Multiple\.fin$` |
 | **`ubb_bank`** | `true` | `ubb_bank` | `db_gttsftp/production/BankStatements/archive2/accesspay/ubb` | *None* | `^\d{12}UBBMT940Multiple\.fin$` |
 | **`jsc_otp_bank`** | `true` | `jsc_otp_bank` | `db_gttsftp/production/BankStatements/archive2/accesspay/jsc` | *None* | `^\d{12}JSCMT940b?Multiple\.fin$` |

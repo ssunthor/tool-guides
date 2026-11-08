@@ -549,38 +549,20 @@ Implemented in `cli/cmc_cli.py` using `NestedHelpGroup` and modular domain group
 
 ### 12.1. Configuration Reference (`config/settings.yaml`)
 
-| Configuration Key | Type | Default / Production Value | Operational Purpose |
-| :--- | :--- | :--- | :--- |
-| `module_info.name` | `str` | `"CMD Connector"` | Human-readable module name reported via `GetAppInfo`. |
-| `module_info.version` | `str` | `"1.3.0"` | Module semantic version (overridden dynamically by `docs/CHANGELOG.yaml` in `SeraStandardServiceImpl`). |
-| `module_info.acronym` | `str` | `"CMC"` | 3-letter ecosystem identifier used for logging, CLI headers (`CMC-CLI`), and health matrices. |
-| `module_info.category` | `str` | `"Connector"` | Ecosystem functional classification. |
-| `module_info.description` | `str` | `"Authoritative gateway for the CMD GraphQL API..."` | Service summary exposed to SAM UI and AMU. |
-| `system_services.grpc.service_name` | `str` | `"cmc-grpc.service"` | `systemd` unit name checked via `systemctl is-active` during `GetAppInfo` / `GetDeepHealth`. |
-| `system_services.grpc.service_type` | `str` | `"grpc"` | Protocol identifier for the primary listener. |
-| `system_services.grpc.host` | `str` | `"0.0.0.0"` | gRPC server bind address (converted to `localhost` by CLI stubs). |
-| `system_services.grpc.port` | `int` | `50053` | TCP port for the gRPC server. |
-| `system_services.grpc.max_workers` | `int` | `10` | Maximum worker threads in the gRPC `ThreadPoolExecutor`. |
-| `external_services.cmd_prod.dependency_name` | `str` | `"cmd_graphql_prod"` | Dependency identifier reported in `GetDeepHealth`. |
-| `external_services.cmd_prod.type` | `str` | `"rest_api"` | Dependency classification for health checks. |
-| `external_services.cmd_prod.api_url` | `str` | `"https://api-gateway.gtt.net/cmd/graphql/"` | Production CMD GraphQL endpoint. |
-| `external_services.cmd_prod.token_url` | `str` | `"https://api-gateway.gtt.net/idp/realms/prod/protocol/openid-connect/token"` | Production CMD Keycloak OAuth2 token endpoint. |
-| `external_services.cmd_prod.client_id` | `str` | `"c370ec73-..."` | OAuth2 client ID for Production CMD API. |
-| `external_services.cmd_prod.client_secret` | `str` | `"<secret>"` | OAuth2 client secret for Production CMD API. |
-| `external_services.cmd_prod.vault_path` | `str` | `"secret/cmd/external/apps/cmd_connector_prod"` | Reference HashiCorp Vault path for production credentials. |
-| `external_services.cmd_prod.scope` | `str` | `"plan:default api:graphql"` | OAuth2 scope requested during `client_credentials` grant. |
-| `external_services.cmd_prod.timeout` | `int` | `30` | Standard HTTP timeout (seconds) for GraphQL queries and token requests. |
-| `external_services.cmd_prod.long_timeout` | `int` | `300` | Extended HTTP timeout (seconds) for bulk `get_erp_transactions` queries. |
-| `external_services.cmd_preprod.*` | `dict` | `https://api-gateway-preprod.gtt.net/...` | Pre-production GraphQL URL, token URL, credentials, `scope: "preprod:graphql"`, and timeouts (`30` / `300`). |
-| `logging.level` | `str` | `"INFO"` | Console `StreamHandler` log level (`sys.stderr`). |
-| `logging.directory` | `str` | `"/ai/assets/logs/cmd_connector"` | Base directory for `cmc_app.log` and `transactions/`. |
-| `logging.enable_file_logging` | `bool` | `true` | Enables rotating file logging (`cmc_app.log`). |
-| `transaction_logging.enabled` | `bool` | `true` | Enables per-RPC JSON audit logging in `utils/rpc_transaction_logger.py`. |
-| `transaction_logging.directory` | `str` | `"transactions"` | Subdirectory under `logging.directory` for RPC transaction JSON files. |
-| `transaction_logging.retain_count` | `int` | `50` | Maximum number of transaction JSON files retained by `cleanup_transactions()`. |
-| `paths.proto_source_dir` | `str` | `"grpc_api/protos"` | Relative path to `cmc_service.proto`. |
-| `paths.sera_proto_source_dir` | `str` | `"/ai/assets/protos/sera_standard"` | Shared path to `sera_standard.proto`. |
-| `paths.generated_stubs_path` | `str` | `"/ai/assets/protos/cmd_connector/generated"` | Output directory for compiled `_pb2.py` and `_pb2_grpc.py` stubs. |
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
+| Configuration Key | Default / Production Value | Operational Purpose |
+| :--- | :--- | :--- |
+| `system_services.grpc` | `"cmc-grpc.service"` (`0.0.0.0:50053`, `10` workers) | Systemd unit, bind address/port, and `ThreadPoolExecutor` worker count. |
+| `external_services.cmd_prod.api_url` | `"https://api-gateway.gtt.net/cmd/graphql/"` | Production CMD GraphQL endpoint (`dependency_name: "cmd_graphql_prod"`). |
+| `external_services.cmd_prod.token_url` | `"https://api-gateway.gtt.net/idp/realms/prod/protocol/openid-connect/token"` | Production CMD Keycloak OAuth2 token endpoint. |
+| `external_services.cmd_prod.client_id` / `client_secret` | `"c370ec73-..."` / `"<secret>"` | OAuth2 client credentials for Production CMD API. |
+| `external_services.cmd_prod.vault_path` | `"secret/cmd/external/apps/cmd_connector_prod"` | Reference HashiCorp Vault path for production credentials. |
+| `external_services.cmd_prod.scope` | `"plan:default api:graphql"` | OAuth2 scope requested during `client_credentials` grant. |
+| `external_services.cmd_prod.timeout` / `long_timeout` | `30` / `300` | Standard HTTP timeout (seconds) and extended timeout for bulk `get_erp_transactions` queries. |
+| `external_services.cmd_preprod.*` | `https://api-gateway-preprod.gtt.net/...` | Pre-production GraphQL URL, token URL, credentials, `scope: "preprod:graphql"`, and timeouts (`30` / `300`). |
+| `transaction_logging.enabled` | `true` | Enables per-RPC JSON audit logging in `utils/rpc_transaction_logger.py`. |
+| `transaction_logging.directory` / `retain_count` | `"transactions"` / `50` | Subdirectory under `logging.directory` and maximum retained RPC transaction JSON files. |
 
 ### 12.2. Security & Cryptographic Key Handling
 * **OAuth2 Client Credentials Flow (`core/cmd_client.py`):** Authenticates against the CMD Keycloak Identity Provider using `client_id` and `client_secret` over HTTPS (`TLS`). Access tokens are stored strictly in process memory (`self._access_token`) and never written to disk or transaction logs.

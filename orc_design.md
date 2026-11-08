@@ -716,42 +716,23 @@ All CLI commands are executed via `./oracle_connector.py <command>`. **All comma
 
 ### 12.1. Configuration Reference (`config/settings.yaml`)
 
-| Configuration Key | Type | Default / Configured Value | Purpose |
-| :--- | :--- | :--- | :--- |
-| `module_info.name` | `str` | `"Oracle Connector"` | Human-readable module name reported to AMU. |
-| `module_info.version` | `str` | `"1.2.5"` | Module version (dynamically resolved from `docs/CHANGELOG.yaml`). |
-| `module_info.category` | `str` | `"Connector"` | SERA architectural category. |
-| `module_info.acronym` | `str` | `"ORC"` | 3-letter module identifier. |
-| `system_services.grpc.service_name` | `str` | `"orc-grpc.service"` | Systemd unit name checked by `GetAppInfo` / `GetDeepHealth`. |
-| `system_services.grpc.host` | `str` | `"0.0.0.0"` | Bind address for inbound ORC gRPC server (fallback to `grpc_server.host`). |
-| `system_services.grpc.port` | `int` | `50054` | Listening port for `OracleConnectorService` and `SeraAppService` (fallback to `grpc_server.port`). |
-| `system_services.grpc.max_workers` | `int` | `10` | Thread pool worker count for gRPC server. |
-| `oracle_erp.prod_business_units` | `list[str]` | `[DK125BU, SE123BU, ...]` | List of Business Units routed to Oracle Production (all others default to TEST). |
-| `oracle_erp.test_bank_accounts_override` | `list[str]` | `[]` (optional) | Specific bank accounts routed unconditionally to TEST regardless of BU. |
-| `external_services.oracle_prod.url` | `str` | `"https://eckv.fa.us2.oraclecloud.com:443"` | Base URL for Oracle Cloud Production. |
-| `external_services.oracle_prod.username` | `str` | `"Sera-AI"` | Technical service account for Oracle Production. |
-| `external_services.oracle_prod.rest_version` | `str` | `"11.13.18.05"` | Oracle FSCM REST API version. |
-| `external_services.oracle_prod.bank_statement.wsdl_path` | `str` | `"/xmlpserver/services/PublicReportService?WSDL"` | BI Publisher SOAP WSDL relative path. |
-| `external_services.oracle_prod.bank_statement.report_path` | `str` | `"/Custom/Financials/Cash Management/GTT Bank Statement Report.xdo"` | Path to GTT Bank Statement BI Publisher report. |
-| `external_services.oracle_prod.ar_receipt.wsdl_path` | `str` | `"/fscmService/StandardReceiptService?WSDL"` | Accounts Receivable Standard Receipt SOAP WSDL path. |
-| `external_services.oracle_prod.create_apply_receipt.wsdl_path` | `str` | `"/fscmService/CreateAndApplyReceiptService?WSDL"` | Combined Create & Apply Receipt SOAP WSDL path. |
-| `external_services.oracle_prod.analytics_ws.wsdl_path` | `str` | `"/analytics-ws/saw.dll?WSDL"` | Oracle Analytics Web Services SOAP WSDL path. |
-| `external_services.oracle_test.url` | `str` | `"https://eckv-test.fa.us2.oraclecloud.com:443"` | Base URL for Oracle Cloud Test. |
-| `external_services.oracle_test.username` | `str` | `"Sera-AI"` | Technical service account for Oracle Test. |
-| `external_services.oracle_test.analytics_ws.wsdl_path` | `str` | `"/analytics-ws/saw.dll?WSDL"` | Oracle Analytics Web Services SOAP WSDL path (TEST). |
-| `external_services.oracle_dev_test.url` | `str` | `"https://eckvdev-test.fa.us2.oraclecloud.com/"` | Base URL for Oracle Cloud Dev-Test environment. |
-| `external_services.oracle_dev_test.username` | `str` | `"Sera-AI"` | Technical service account for Dev-Test. |
-| `paths.wsdl_cache_dir` | `str` | `"discovery"` | Directory storing downloaded SOAP WSDLs and summaries. |
-| `paths.json_cache_dir` | `str` | `"cache"` | Directory storing exported JSON master data. |
-| `paths.proto_source_dir` | `str` | `"grpc_api/protos"` | Directory containing `orc.proto`. |
-| `paths.sera_proto_source_dir` | `str` | `"/ai/assets/protos/sera_standard"` | Directory containing `sera_standard.proto`. |
-| `paths.generated_stubs_path` | `str` | `"/ai/assets/protos/oracle_connector/generated"` | Output directory for compiled `orc_pb2` and `sera_standard_pb2` stubs. |
-| `logging.level` | `str` | `"INFO"` | Console logging threshold (`orc_app.log` always logs at `DEBUG`). |
-| `logging.directory` | `str` | `"/ai/assets/logs/orc_connector"` | Output directory for rotating log files. |
-| `logging.backup_count_days` | `int` | `14` | Log file retention window in days. |
-| `transaction_logging.enabled` | `bool` | `true` | Master toggle for structured JSON transaction logging. |
-| `transaction_logging.directory` | `str` | `"transactions"` | Subdirectory for timestamped JSON audit files. |
-| `transaction_logging.retain_count` | `int` | `200` | Maximum number of transaction audit logs retained before pruning. |
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
+| Configuration Key | Default / Configured Value | Purpose |
+| :--- | :--- | :--- |
+| `system_services.grpc` | `"orc-grpc.service"` (`0.0.0.0:50054`, `10` workers) | Systemd unit, bind address/port, and worker count for `OracleConnectorService` and `SeraAppService`. |
+| `oracle_erp.prod_business_units` | `[DK125BU, SE123BU, ...]` | List of Business Units routed to Oracle Production (all others default to TEST). |
+| `oracle_erp.test_bank_accounts_override` | `[]` (optional) | Specific bank accounts routed unconditionally to TEST regardless of BU. |
+| `external_services.oracle_prod.url` / `username` | `"https://eckv.fa.us2.oraclecloud.com:443"` / `"Sera-AI"` | Base URL and technical service account for Oracle Cloud Production (`rest_version: "11.13.18.05"`). |
+| `external_services.oracle_prod.bank_statement` | `wsdl_path: "/xmlpserver/services/PublicReportService?WSDL"`<br/>`report_path: "/Custom/Financials/Cash Management/GTT Bank Statement Report.xdo"` | BI Publisher SOAP WSDL and GTT Bank Statement report path. |
+| `external_services.oracle_prod.ar_receipt.wsdl_path` | `"/fscmService/StandardReceiptService?WSDL"` | Accounts Receivable Standard Receipt SOAP WSDL path. |
+| `external_services.oracle_prod.create_apply_receipt.wsdl_path` | `"/fscmService/CreateAndApplyReceiptService?WSDL"` | Combined Create & Apply Receipt SOAP WSDL path. |
+| `external_services.oracle_prod.analytics_ws.wsdl_path` | `"/analytics-ws/saw.dll?WSDL"` | Oracle Analytics Web Services SOAP WSDL path. |
+| `external_services.oracle_test` | `"https://eckv-test.fa.us2.oraclecloud.com:443"` (`"Sera-AI"`) | Base URL, technical account, and SOAP WSDL paths for Oracle Cloud Test. |
+| `external_services.oracle_dev_test` | `"https://eckvdev-test.fa.us2.oraclecloud.com/"` (`"Sera-AI"`) | Base URL and technical service account for Oracle Cloud Dev-Test environment. |
+| `paths.wsdl_cache_dir` / `json_cache_dir` | `"discovery"` / `"cache"` | Directories storing downloaded SOAP WSDLs/summaries and exported JSON master data. |
+| `transaction_logging.enabled` | `true` | Master toggle for structured JSON transaction logging. |
+| `transaction_logging.directory` / `retain_count` | `"transactions"` / `200` | Subdirectory for timestamped JSON audit files and maximum retained count before pruning. |
 
 #### Configured Production Business Units (`oracle_erp.prod_business_units`)
 

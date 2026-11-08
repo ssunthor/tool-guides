@@ -523,50 +523,19 @@ sudo systemctl status nba-grpc.service
 
 ### 12.1. Configuration Reference (`config/settings.yaml`)
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | Configuration Key | Purpose | Default / Production Value |
 | :--- | :--- | :--- |
-| `module_info.name` | Human-readable module name reported via `GetAppInfo` | `"NetBox Assistant"` |
-| `module_info.version` | Module semantic version (overridden by `CHANGELOG.yaml` in `SeraAppService`) | `"2.0.3"` |
-| `module_info.acronym` | Ecosystem module identifier passed as `client_application` to NBC | `"NBA"` |
-| `module_info.category` | Ecosystem functional classification | `"Assistant"` |
-| `module_info.description` | Summary description reported to AMU | `"An AI-powered assistant that translates natural language requests into automated NetBox tasks."` |
-| `system_services.grpc.service_name` | Systemd unit name for the SERA Standard gRPC service | `"nba-grpc.service"` |
-| `system_services.grpc.service_type` | Protocol type reported to AMU | `"grpc"` |
-| `system_services.grpc.host` | Bind address for gRPC server | `"0.0.0.0"` |
-| `system_services.grpc.port` | Listening port for gRPC server | `50082` |
-| `system_services.api.service_name` | Systemd unit name for the FastAPI server | `"nba-api.service"` |
-| `system_services.api.service_type` | Service classification reported to AMU | `"api"` |
-| `system_services.api.host` | Bind address for FastAPI server | `"0.0.0.0"` |
-| `system_services.api.port` | Listening port for FastAPI server | `7891` |
-| `external_services.vault.dependency_name` | Vault dependency identifier in `GetDeepHealth` | `"vault-aif_api"` |
-| `external_services.vault.type` | Dependency type classification | `"rest_api"` |
-| `external_services.vault.url` | HashiCorp Vault endpoint URL | `"https://vault-aif.gt-t.net:8200"` |
-| `external_services.vault.role_id` | Vault AppRole Role ID | `"b67471e8-5293-61b1-0939-dee907e88331"` |
-| `external_services.vault.secret_id` | Vault AppRole Secret ID | `"886206c3-5902-c8d5-98ed-9739e0f9c25a"` |
+| `system_services.grpc` | Systemd unit and bind address/port for the SERA Standard gRPC service | `"nba-grpc.service"` (`0.0.0.0:50082`) |
+| `system_services.api` | Systemd unit and bind address/port for the FastAPI server | `"nba-api.service"` (`0.0.0.0:7891`) |
+| `external_services.vault` | HashiCorp Vault endpoint URL and AppRole credentials (`role_id`, `secret_id`) | `"https://vault-aif.gt-t.net:8200"` (`dependency_name: "vault-aif_api"`) |
 | `vault_paths.llm_api_key` | KV v2 path containing the global LLM `secret` key | `"secret/haproxy/global/apps/nba-prod"` |
-| `connectors.nbc.host` | Target host for NetBox Connector gRPC server | `"localhost"` |
-| `connectors.nbc.port` | Target port for NetBox Connector gRPC server | `50081` |
-| `connectors.nbc.timeout_seconds` | Default RPC timeout for NBC calls | `60` |
-| `llm_engines.primary.provider` | LLM inference engine provider type | `"vllm"` |
-| `llm_engines.primary.base_url` | Base URL for the AI Factory vLLM instance | `"https://aif-llm-vllm-gemma4-31b.aif.gt-t.net"` |
-| `llm_engines.primary.api_endpoint` | OpenAI-compatible chat completions path | `"/v1/chat/completions"` |
-| `llm_engines.primary.model` | Target model identifier | `"google/gemma-4-31B-it"` |
-| `llm_engines.primary.timeout_seconds` | HTTP request timeout for LLM calls | `180` |
-| `llm_engines.primary.ssl_verify` | Toggles TLS certificate verification | `false` |
-| `llm_engines.primary.max_tokens` | Maximum generation token limit | `32768` |
-| `llm_engines.primary.enable_thinking` | Default reasoning mode (`"disable"` overridden per prompt stage) | `"disable"` |
-| `logging.level` | Console `stderr` log threshold | `"INFO"` |
-| `logging.directory` | Base directory for application and transaction logs | `"/ai/assets/logs/nba_assistant"` |
-| `logging.enable_file_logging` | Enables `RotatingFileHandler` log files | `true` |
-| `logging.app_log_filename` | Filename for application logs | `"nba.log"` |
-| `logging.error_log_filename` | Filename for warning/error logs | `"nba_err.log"` |
+| `connectors.nbc` | Target host, port, and RPC timeout for NetBox Connector gRPC server | `"localhost:50081"` (`timeout: 60s`) |
+| `llm_engines.primary` | AI Factory vLLM endpoint, model (`google/gemma-4-31B-it`), timeout, max tokens, and thinking mode | `"https://aif-llm-vllm-gemma4-31b.aif.gt-t.net"` (`timeout: 180s`, `max_tokens: 32768`, `enable_thinking: "disable"`) |
 | `transaction_logging.enabled` | Enables per-run JSON transaction audit logs | `true` |
-| `transaction_logging.directory` | Subdirectory under `logging.directory/{user_id}/` | `"transactions"` |
-| `transaction_logging.retain_count` | Maximum transaction log files kept per user | `50` |
-| `paths.shared_assets_path` | Path to shared `/ai/assets` directory | `"/ai/assets"` |
-| `paths.generated_stubs_path` | Directory containing compiled NBC and SERA protobuf stubs | `"/ai/assets/protos/netbox_connector/generated"` |
-| `user_context.username` | Fallback username when Gateway headers are absent | `"local_user"` |
-| `user_context.display_name` | Fallback display name when Gateway headers are absent | `"Local User"` |
+| `transaction_logging.directory` / `retain_count` | Subdirectory under `logging.directory/{user_id}/` and max retained files per user | `"transactions"` / `50` |
+| `user_context.username` / `display_name` | Fallback user identity when Gateway headers are absent | `"local_user"` / `"Local User"` |
 
 ### 12.2. Security & Cryptographic Key Handling
 

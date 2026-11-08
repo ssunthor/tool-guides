@@ -433,44 +433,19 @@ Defined in `cli/nbc_cli.py`, `cli/commands/discover_cmds.py`, `cli/commands/modu
 
 ### 12.1. Configuration Reference (`config/settings.yaml`)
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | Configuration Key | Purpose | Default / Production Value |
 | :--- | :--- | :--- |
-| `module_info.name` | Human-readable module name reported via `GetAppInfo` | `"NetBox Connector"` |
-| `module_info.version` | Module semantic version (overridden by `CHANGELOG.yaml` in `SeraAppService`) | `"1.2.5"` |
-| `module_info.acronym` | Ecosystem module identifier | `"NBC"` |
-| `module_info.category` | Ecosystem functional classification | `"Connector"` |
-| `module_info.description` | Summary description reported to AMU | `"A deterministic, schema-aware connector that acts as an expert automation gateway to the NetBox API."` |
-| `system_services.grpc.service_name` | Systemd unit name checked via `systemctl is-active` | `"nbc-grpc.service"` |
-| `system_services.grpc.service_type` | Protocol type reported to AMU | `"grpc"` |
-| `system_services.grpc.host` | Bind address for gRPC server | `"0.0.0.0"` |
-| `system_services.grpc.port` | Listening port for gRPC server | `50081` |
-| `system_services.grpc.max_workers` | ThreadPoolExecutor worker count for gRPC server | `10` |
-| `external_services.vault.dependency_name` | Dependency identifier in `GetDeepHealth` matrix | `"vault-aif_api"` |
-| `external_services.vault.type` | Dependency type classification | `"rest_api"` |
-| `external_services.vault.url` | HashiCorp Vault endpoint URL | `"https://vault-aif.gt-t.net:8200"` |
-| `external_services.vault.role_id` | Vault AppRole Role ID | `"b67471e8-5293-61b1-0939-dee907e88331"` |
-| `external_services.vault.secret_id` | Vault AppRole Secret ID | `"886206c3-5902-c8d5-98ed-9739e0f9c25a"` |
-| `external_services.netbox_stg.dependency_name` | Staging NetBox dependency identifier | `"netbox_stg_api"` |
-| `external_services.netbox_stg.url` | Staging NetBox base API URL | `"https://netbox-stg.gt-t.net/api"` |
-| `external_services.netbox_stg.timeout_seconds` | HTTP request timeout for staging NetBox | `30` |
-| `external_services.netbox_prod.dependency_name` | Production NetBox dependency identifier | `"netbox_prod_api"` |
-| `external_services.netbox_prod.url` | Production NetBox base API URL | `"https://netbox.gt-t.net/api"` |
-| `external_services.netbox_prod.timeout_seconds` | HTTP request timeout for production NetBox | `30` |
+| `system_services.grpc` | Systemd unit, bind address/port, and `ThreadPoolExecutor` worker count | `"nbc-grpc.service"` (`0.0.0.0:50081`, `10` workers) |
+| `external_services.vault` | HashiCorp Vault endpoint URL and AppRole credentials (`role_id`, `secret_id`) | `"https://vault-aif.gt-t.net:8200"` (`dependency_name: "vault-aif_api"`) |
+| `external_services.netbox_stg` | Staging NetBox base API URL and HTTP request timeout | `"https://netbox-stg.gt-t.net/api"` (`timeout: 30s`, `dependency_name: "netbox_stg_api"`) |
+| `external_services.netbox_prod` | Production NetBox base API URL and HTTP request timeout | `"https://netbox.gt-t.net/api"` (`timeout: 30s`, `dependency_name: "netbox_prod_api"`) |
 | `vault_paths.netbox` | KV v2 secret path containing the shared NetBox `token` | `"netbox/external/shared/gia_ai"` |
 | `active_netbox_env` | Active target profile (`netbox_stg` or `netbox_prod`) used by gRPC server | `"netbox_stg"` |
 | `discovery.custom_field_interval_seconds` | Sleep interval for background custom field discovery thread | `3600` |
-| `logging.level` | Console `stderr` logging threshold | `"INFO"` |
-| `logging.directory` | Base directory for daily application and transaction logs | `"/ai/assets/logs/nbc_connector"` |
-| `logging.enable_file_logging` | Enables `MultiProcessSafeDailyLogger` file handlers | `true` |
-| `logging.app_log_filename` | Base filename for `DEBUG`+ application logs | `"nbc.log"` |
-| `logging.error_log_filename` | Base filename for `WARNING`+ error logs | `"nbc_err.log"` |
 | `transaction_logging.enabled` | Toggles per-RPC JSON audit file creation | `true` |
-| `transaction_logging.directory` | Subdirectory under `logging.directory` for RPC JSON files | `"transactions"` |
-| `transaction_logging.retain_count` | Maximum number of JSON transaction files retained on cleanup | `50` |
-| `paths.shared_assets_path` | Relative path to shared `/ai/assets` directory | `"../assets"` |
-| `paths.proto_source_dir` | Local relative directory containing `nbc_service.proto` | `"grpc_api/protos"` |
-| `paths.generated_stubs_path` | Output directory for compiled `_pb2.py` and `_pb2_grpc.py` stubs | `"/ai/assets/protos/netbox_connector/generated"` |
-| `paths.sera_proto_source_dir` | Directory containing `sera_standard.proto` | `"/ai/assets/protos/sera_standard"` |
+| `transaction_logging.directory` / `retain_count` | Subdirectory under `logging.directory` and maximum retained RPC JSON files | `"transactions"` / `50` |
 | `paths.llm_guide_path` | File path read by `GetLlmGuide` RPC | `"/ai/assets/guides/llm_guides/nbc_llm_guide.md"` |
 
 ### 12.2. Security & Cryptographic Key Handling
